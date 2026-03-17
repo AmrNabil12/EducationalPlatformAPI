@@ -10,7 +10,7 @@ import '../models.dart';
 class ApiService {
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://educationalplatformapi-production.up.railway.app',
+    defaultValue: 'https://educationplatform-production-d1be.up.railway.app',
   );
 
   Uri _uri(String path) => Uri.parse('$baseUrl$path');

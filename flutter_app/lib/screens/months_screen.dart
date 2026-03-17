@@ -1,5 +1,5 @@
 import 'dart:io';
-
+import 'package:flutter_pdfview/flutter_pdfview.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -1175,7 +1175,7 @@ class _IconBtn extends StatelessWidget {
 // Simple PDF viewer screen (uses flutter_pdfview or similar)
 // For now shows a "open with" message — replace with your PDF viewer package
 // ---------------------------------------------------------------------------
-class _PdfViewerScreen extends StatelessWidget {
+class _PdfViewerScreen extends StatefulWidget {
   final String title;
   final String filePath;
 
@@ -1185,39 +1185,43 @@ class _PdfViewerScreen extends StatelessWidget {
   });
 
   @override
+  State<_PdfViewerScreen> createState() => _PdfViewerScreenState();
+}
+
+class _PdfViewerScreenState extends State<_PdfViewerScreen> {
+  int _totalPages = 0;
+  int _currentPage = 0;
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(title)),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.picture_as_pdf_rounded,
-                  size: 64, color: Color(0xFFE53935)),
-              const SizedBox(height: 16),
-              Text(
-                title,
-                style: const TextStyle(
-                    fontWeight: FontWeight.w700, fontSize: 16),
-                textAlign: TextAlign.center,
+      appBar: AppBar(
+        title: Text(widget.title),
+        actions: [
+          if (_totalPages > 0)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Center(
+                child: Text(
+                  '${_currentPage + 1} / $_totalPages',
+                  style: const TextStyle(fontSize: 14),
+                ),
               ),
-              const SizedBox(height: 8),
-              Text(
-                filePath,
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              const Text(
-                'Add a PDF viewer package (e.g. flutter_pdfview) to your pubspec.yaml to render PDFs inline.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey),
-              ),
-            ],
-          ),
-        ),
+            ),
+        ],
+      ),
+      body: PDFView(
+        filePath: widget.filePath,
+        enableSwipe: true,
+        swipeHorizontal: false,
+        autoSpacing: true,
+        pageFling: true,
+        onRender: (pages) {
+          setState(() => _totalPages = pages ?? 0);
+        },
+        onPageChanged: (page, total) {
+          setState(() => _currentPage = page ?? 0);
+        },
       ),
     );
   }
