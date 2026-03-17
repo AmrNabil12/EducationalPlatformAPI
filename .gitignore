@@ -1,0 +1,56 @@
+# Environment files - NEVER commit these
+backend/.env
+.env
+*.env
+
+# Encrypted video files - too large for git
+encrypted/
+decrypted_cache/
+
+# Original source videos - too large for git
+videos/
+
+# Node modules
+node_modules/
+backend/node_modules/
+
+# Flutter build outputs
+flutter_app/build/
+flutter_app/.dart_tool/
+flutter_app/.flutter-plugins
+flutter_app/.flutter-plugins-dependencies
+flutter_app/.packages
+
+# Android build outputs
+flutter_app/android/.gradle/
+flutter_app/android/app/build/
+flutter_app/android/local.properties
+flutter_app/android/key.properties
+
+# iOS build outputs
+flutter_app/ios/Pods/
+flutter_app/ios/.symlinks/
+flutter_app/ios/Flutter/Flutter.framework
+flutter_app/ios/Flutter/Flutter.podspec
+
+# macOS
+flutter_app/macos/Pods/
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Python cache (admin_tools)
+__pycache__/
+*.pyc
+*.pyo
+admin_tools/__pycache__/

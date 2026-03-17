@@ -1,0 +1,20 @@
+{
+  "name": "educational-platform-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server_db.js",
+    "dev": "node src/server_db.js",
+    "db:init": "node scripts/initDb.js",
+    "seed:serials": "node scripts/seedSerials.js --count=25",
+    "drive:index": "node scripts/generateDriveIndexTemplate.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1"
+  }
+}
