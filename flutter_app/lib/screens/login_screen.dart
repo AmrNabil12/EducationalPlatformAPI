@@ -494,72 +494,85 @@ class _LoginScreenState extends State<LoginScreen>
       child: Builder(
         builder: (context) {
           final focused = focusNode.hasFocus;
-          return AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              color: Colors.white.withValues(alpha: focused ? 0.1 : 0.05),
-              border: Border.all(
-                color: focused
-                    ? teal.withValues(alpha: 0.7)
-                    : Colors.white.withValues(alpha: 0.1),
-                width: focused ? 1.5 : 1,
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Label above the field — no floating
+              Padding(
+                padding: const EdgeInsets.only(left: 4, bottom: 6),
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: focused
+                        ? teal
+                        : Colors.white.withValues(alpha: 0.5),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.4,
+                  ),
+                ),
               ),
-            ),
-            child: TextField(
-              controller: controller,
-              focusNode: focusNode,
-              textInputAction: nextFocus != null
-                  ? TextInputAction.next
-                  : TextInputAction.done,
-              onSubmitted: onSubmitted ??
-                  (nextFocus != null
-                      ? (_) => FocusScope.of(context)
-                          .requestFocus(nextFocus)
-                      : null),
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  color: Colors.white.withValues(alpha: focused ? 0.1 : 0.05),
+                  border: Border.all(
+                    color: focused
+                        ? teal.withValues(alpha: 0.7)
+                        : Colors.white.withValues(alpha: 0.1),
+                    width: focused ? 1.5 : 1,
+                  ),
+                ),
+                child: TextField(
+                  controller: controller,
+                  focusNode: focusNode,
+                  textInputAction: nextFocus != null
+                      ? TextInputAction.next
+                      : TextInputAction.done,
+                  onSubmitted: onSubmitted ??
+                      (nextFocus != null
+                          ? (_) => FocusScope.of(context)
+                              .requestFocus(nextFocus)
+                          : null),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: hint,
+                    hintStyle: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.2),
+                      fontSize: 13,
+                    ),
+                    prefixIcon: Icon(
+                      icon,
+                      color: focused
+                          ? teal
+                          : Colors.white.withValues(alpha: 0.35),
+                      size: 20,
+                    ),
+                    filled: true,
+                    fillColor: Colors.transparent,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 14),
+                  ),
+                ),
               ),
-              decoration: InputDecoration(
-                labelText: label,
-                hintText: hint,
-                labelStyle: TextStyle(
-                  color: focused
-                      ? teal
-                      : Colors.white.withValues(alpha: 0.45),
-                  fontSize: 13,
-                ),
-                hintStyle: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.2),
-                  fontSize: 13,
-                ),
-                prefixIcon: Icon(
-                  icon,
-                  color: focused
-                      ? teal
-                      : Colors.white.withValues(alpha: 0.35),
-                  size: 20,
-                ),
-                filled: true,
-                fillColor: Colors.transparent,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none,
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none,
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16, vertical: 14),
-              ),
-            ),
+            ],
           );
         },
       ),
