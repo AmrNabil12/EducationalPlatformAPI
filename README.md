@@ -1,4 +1,4 @@
-# Educational Platform (Flutter + Secure Video Delivery MVP)
+# Educational Platform (Secure Video Delivery MVP)
 
 This repository contains a full starter implementation for your requested educational platform:
 
@@ -7,12 +7,6 @@ This repository contains a full starter implementation for your requested educat
   - validates serial numbers,
   - binds each serial permanently to one device,
   - issues playback licenses only to authorized devices.
-- **Flutter app** that:
-  - signs in with serial,
-  - remembers signed-in device,
-  - shows videos grouped by months **M1..M12**,
-  - decrypts encrypted videos and plays them with controls (±10s, speed).
-
 ---
 
 ## 1) Project Structure
