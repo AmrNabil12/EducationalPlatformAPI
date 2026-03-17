@@ -542,7 +542,20 @@ class _LoginScreenState extends State<LoginScreen>
                       : Colors.white.withValues(alpha: 0.35),
                   size: 20,
                 ),
-                border: InputBorder.none,
+                filled: true,
+                fillColor: Colors.transparent,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide.none,
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide.none,
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide.none,
+                ),
                 contentPadding: const EdgeInsets.symmetric(
                     horizontal: 16, vertical: 14),
               ),
