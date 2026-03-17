@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'package:flutter_pdfview/flutter_pdfview.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -10,6 +10,7 @@ import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/playback_service.dart';
 import 'video_player_screen.dart';
+import 'package:flutter_pdfview/flutter_pdfview.dart';
 
 // ---------------------------------------------------------------------------
 // Month accent colours — one per month slot
@@ -94,6 +95,34 @@ class _MonthsScreenState extends State<MonthsScreen>
   void dispose() {
     _listAnimController.dispose();
     super.dispose();
+  }
+
+
+  Future<void> _confirmLogout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Sign Out'),
+        content: const Text('Are you sure you want to sign out?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Sign Out'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await widget.onLogout();
+    }
   }
 
   Future<void> _load() async {
@@ -421,7 +450,7 @@ class _MonthsScreenState extends State<MonthsScreen>
         ),
         actions: [
           IconButton(
-            onPressed: widget.onLogout,
+            onPressed: _confirmLogout,
             icon: const Icon(Icons.logout, color: Colors.white),
             tooltip: 'Logout',
           ),
@@ -982,7 +1011,7 @@ class _VideoRow extends StatelessWidget {
                 child: TweenAnimationBuilder<double>(
                   tween: Tween(begin: 0, end: progress),
                   duration: const Duration(milliseconds: 180),
-                  builder: (_, v, _) => Column(
+                  builder: (_, v, __) => Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       LinearProgressIndicator(
@@ -1114,7 +1143,7 @@ class _PdfRow extends StatelessWidget {
                 child: TweenAnimationBuilder<double>(
                   tween: Tween(begin: 0, end: progress),
                   duration: const Duration(milliseconds: 180),
-                  builder: (_, v, _) => Column(
+                  builder: (_, v, __) => Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       LinearProgressIndicator(
@@ -1191,37 +1220,123 @@ class _PdfViewerScreen extends StatefulWidget {
 class _PdfViewerScreenState extends State<_PdfViewerScreen> {
   int _totalPages = 0;
   int _currentPage = 0;
+  bool _isFullscreen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+  }
+
+  @override
+  void dispose() {
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    super.dispose();
+  }
+
+  Future<void> _toggleFullscreen() async {
+    if (_isFullscreen) {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } else {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
+    if (!mounted) return;
+    setState(() => _isFullscreen = !_isFullscreen);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-        actions: [
-          if (_totalPages > 0)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Center(
-                child: Text(
-                  '${_currentPage + 1} / $_totalPages',
-                  style: const TextStyle(fontSize: 14),
+      appBar: isLandscape
+          ? null
+          : AppBar(
+              title: Text(widget.title),
+              actions: [
+                if (_totalPages > 0)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Center(
+                      child: Text(
+                        '${_currentPage + 1} / $_totalPages',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+      body: Stack(
+        children: [
+          PDFView(
+            filePath: widget.filePath,
+            enableSwipe: true,
+            swipeHorizontal: false,
+            autoSpacing: true,
+            pageFling: true,
+            onRender: (pages) {
+              setState(() => _totalPages = pages ?? 0);
+            },
+            onPageChanged: (page, total) {
+              setState(() => _currentPage = page ?? 0);
+            },
+          ),
+          // Fullscreen toggle button — bottom right
+          Positioned(
+            bottom: 16,
+            right: 16,
+            child: Material(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(8),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: _toggleFullscreen,
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Icon(
+                    _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Page indicator in landscape
+          if (isLandscape && _totalPages > 0)
+            Positioned(
+              bottom: 16,
+              left: 16,
+              child: Material(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  child: Text(
+                    '${_currentPage + 1} / $_totalPages',
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 13),
+                  ),
                 ),
               ),
             ),
         ],
-      ),
-      body: PDFView(
-        filePath: widget.filePath,
-        enableSwipe: true,
-        swipeHorizontal: false,
-        autoSpacing: true,
-        pageFling: true,
-        onRender: (pages) {
-          setState(() => _totalPages = pages ?? 0);
-        },
-        onPageChanged: (page, total) {
-          setState(() => _currentPage = page ?? 0);
-        },
       ),
     );
   }

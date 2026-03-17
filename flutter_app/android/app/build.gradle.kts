@@ -37,6 +37,18 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+                "META-INF/MANIFEST.MF",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+            )
+        }
+    }
 }
 
 dependencies {
