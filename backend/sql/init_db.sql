@@ -1,5 +1,6 @@
-```
 BEGIN;
+
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- 1) Student serials / subscriptions table
 CREATE TABLE IF NOT EXISTS student_serials (
@@ -24,6 +25,52 @@ WHERE device_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_student_serials_serial_upper
   ON student_serials ((UPPER(serial_no)));
+
+-- 2) Session registry used by quizzes.
+CREATE TABLE IF NOT EXISTS sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  month_code TEXT NOT NULL,
+  session_code TEXT NOT NULL,
+  title TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (month_code, session_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_month_session
+  ON sessions (month_code, session_code);
+
+-- 3) Quiz questions.
+CREATE TABLE IF NOT EXISTS quiz_questions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  image_url TEXT NOT NULL,
+  correct_option_index INT NOT NULL CHECK (correct_option_index >= 0),
+  options_count INT NOT NULL CHECK (options_count BETWEEN 2 AND 6),
+  points INT NOT NULL DEFAULT 1 CHECK (points >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quiz_questions_session_id
+  ON quiz_questions (session_id, created_at, id);
+
+-- 4) Quiz results.
+CREATE TABLE IF NOT EXISTS quiz_results (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  student_id BIGINT NOT NULL REFERENCES student_serials(id) ON DELETE CASCADE,
+  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  score INT NOT NULL CHECK (score >= 0),
+  total_questions INT NOT NULL CHECK (total_questions >= 0),
+  student_answers JSONB NOT NULL,
+  time_taken_seconds INT NOT NULL CHECK (time_taken_seconds >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT quiz_results_student_answers_array CHECK (jsonb_typeof(student_answers) = 'array')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quiz_results_student_session_unique
+  ON quiz_results (student_id, session_id);
+
+CREATE INDEX IF NOT EXISTS idx_quiz_results_session_id
+  ON quiz_results (session_id, created_at);
 
 -- ---------------------------
 -- Sample seed data (edit/delete as you like)
@@ -57,5 +104,3 @@ VALUES
 ON CONFLICT (serial_no) DO NOTHING;
 
 COMMIT;
-
-```

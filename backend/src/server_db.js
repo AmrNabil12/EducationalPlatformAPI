@@ -207,7 +207,7 @@ function authMiddleware(req, res, next) {
 
 async function getStudentBySerial(client, serial) {
   const result = await client.query(
-    `SELECT serial_no, device_id, active, allowed_months, public_key_pem
+    `SELECT id, serial_no, device_id, active, allowed_months, public_key_pem
      FROM "${studentTable}"
      WHERE UPPER(serial_no) = UPPER($1)
      LIMIT 1`,
@@ -262,6 +262,145 @@ function normalizeRecordUrl(rawUrl) {
   } catch {
     return value;
   }
+}
+
+function normalizeMonthCode(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return /^M(1[0-2]|[1-9])$/.test(normalized) ? normalized : '';
+}
+
+function normalizeSessionCode(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return /^S\d+$/.test(normalized) ? normalized : '';
+}
+
+async function ensureCatalogSessions(client, catalog) {
+  const pairs = new Map();
+
+  for (const entry of [...(catalog?.videos || []), ...(catalog?.pdfs || [])]) {
+    const month = normalizeMonthCode(entry?.month);
+    const session = normalizeSessionCode(entry?.session);
+    if (!month || !session) continue;
+    pairs.set(`${month}:${session}`, { month, session });
+  }
+
+  for (const pair of pairs.values()) {
+    await client.query(
+      `INSERT INTO sessions (month_code, session_code, title)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (month_code, session_code) DO NOTHING`,
+      [pair.month, pair.session, `${pair.month} ${pair.session}`],
+    );
+  }
+}
+
+async function loadSessionMap(client) {
+  const result = await client.query(
+    `SELECT id, month_code, session_code, title
+     FROM sessions`,
+  );
+
+  const map = new Map();
+  for (const row of result.rows) {
+    const month = normalizeMonthCode(row.month_code);
+    const session = normalizeSessionCode(row.session_code);
+    if (!month || !session) continue;
+    map.set(`${month}:${session}`, row);
+  }
+  return map;
+}
+
+async function getSessionById(client, sessionId) {
+  const result = await client.query(
+    `SELECT id, month_code, session_code, title
+     FROM sessions
+     WHERE id = $1
+     LIMIT 1`,
+    [sessionId],
+  );
+  return result.rows[0] || null;
+}
+
+async function getQuizQuestions(client, sessionId) {
+  const result = await client.query(
+    `SELECT id, image_url, correct_option_index, options_count, points, created_at
+     FROM quiz_questions
+     WHERE session_id = $1
+     ORDER BY created_at ASC, id ASC`,
+    [sessionId],
+  );
+  return result.rows;
+}
+
+function mapQuizQuestionForPlayer(question) {
+  return {
+    id: String(question.id || ''),
+    imageUrl: String(question.image_url || ''),
+    optionsCount: Number(question.options_count) || 0,
+    points: Number(question.points) || 0,
+  };
+}
+
+function mapQuizQuestionForReview(question, studentAnswers, index) {
+  const answer = Array.isArray(studentAnswers) ? studentAnswers[index] : null;
+  const normalizedStudentChoice = Number.isInteger(answer) ? answer : null;
+  return {
+    id: String(question.id || ''),
+    imageUrl: String(question.image_url || ''),
+    optionsCount: Number(question.options_count) || 0,
+    points: Number(question.points) || 0,
+    studentChoiceIndex: normalizedStudentChoice,
+    correctOptionIndex: Number(question.correct_option_index),
+    isCorrect: normalizedStudentChoice === Number(question.correct_option_index),
+  };
+}
+
+async function buildQuizStatusPayload(client, studentId, sessionRow) {
+  const questions = await getQuizQuestions(client, sessionRow.id);
+  const result = await client.query(
+    `SELECT id, score, total_questions, student_answers, time_taken_seconds, created_at
+     FROM quiz_results
+     WHERE student_id = $1 AND session_id = $2
+     LIMIT 1`,
+    [studentId, sessionRow.id],
+  );
+
+  const questionCount = questions.length;
+  const totalPoints = questions.reduce((sum, question) => sum + (Number(question.points) || 0), 0);
+  const hasQuiz = questionCount > 0;
+
+  if (result.rowCount === 0) {
+    return {
+      hasQuiz,
+      attempted: false,
+      sessionId: String(sessionRow.id),
+      month: String(sessionRow.month_code || ''),
+      session: String(sessionRow.session_code || ''),
+      totalQuestions: questionCount,
+      totalPoints,
+      questions: questions.map(mapQuizQuestionForPlayer),
+    };
+  }
+
+  const row = result.rows[0];
+  const studentAnswers = Array.isArray(row.student_answers) ? row.student_answers : [];
+  return {
+    hasQuiz,
+    attempted: true,
+    sessionId: String(sessionRow.id),
+    month: String(sessionRow.month_code || ''),
+    session: String(sessionRow.session_code || ''),
+    result: {
+      id: String(row.id),
+      score: Number(row.score) || 0,
+      totalQuestions: Number(row.total_questions) || 0,
+      totalPoints,
+      studentAnswers,
+      timeTakenSeconds: Number(row.time_taken_seconds) || 0,
+      createdAt: row.created_at,
+    },
+    questions: questions.map((question, index) => mapQuizQuestionForReview(question, studentAnswers, index)),
+  };
 }
 
 function createGoogleDriveDownloadUrl(fileId) {
@@ -681,6 +820,8 @@ app.get('/videos', authMiddleware, async (req, res) => {
 
     const allowedMonths = authState.allowedMonths;
     const catalog = readCatalog();
+    await ensureCatalogSessions(client, catalog);
+    const sessionMap = await loadSessionMap(client);
 
     let months = allowedMonths.map((month) => {
       // Videos
@@ -713,7 +854,25 @@ app.get('/videos', authMiddleware, async (req, res) => {
         })
         .filter((p) => p.id && p.downloadUrl);
 
-      return { month, videos, pdfs };
+      const quizSessions = new Map();
+      for (const video of videos) {
+        quizSessions.set(String(video.session || '').toUpperCase(), true);
+      }
+      for (const pdf of pdfs) {
+        quizSessions.set(String(pdf.session || '').toUpperCase(), true);
+      }
+
+      const quizzes = Array.from(quizSessions.keys()).map((sessionCode) => {
+        const sessionRow = sessionMap.get(`${month}:${sessionCode}`);
+        return {
+          month,
+          session: sessionCode,
+          sessionId: sessionRow?.id ? String(sessionRow.id) : '',
+          hasQuiz: Boolean(sessionRow?.id),
+        };
+      }).filter((quiz) => quiz.hasQuiz && quiz.sessionId);
+
+      return { month, videos, pdfs, quizzes };
     });
 
     // Fallback to legacy math_records if no catalog videos exist at all
@@ -736,13 +895,160 @@ app.get('/videos', authMiddleware, async (req, res) => {
           })
           .filter(Boolean);
 
-        return { month, videos, pdfs: [] };
+        const sessionRow = sessionMap.get(`${month}:S1`);
+        return {
+          month,
+          videos,
+          pdfs: [],
+          quizzes: sessionRow?.id ? [{ month, session: 'S1', sessionId: String(sessionRow.id), hasQuiz: true }] : [],
+        };
       });
     }
 
     return res.json({ generatedAt: new Date().toISOString(), months });
   } catch (error) {
     return res.status(500).json({ error: `Failed to query months: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/quiz/status/:sessionId', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authState = await getStudentFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status || 401).json({ error: authState.error });
+    }
+
+    const sessionRow = await getSessionById(client, req.params.sessionId);
+    if (!sessionRow) {
+      return res.status(404).json({ error: 'Quiz session not found' });
+    }
+
+    const month = normalizeMonthCode(sessionRow.month_code);
+    if (!month || !authState.allowedMonths.includes(month)) {
+      return res.status(403).json({ error: `You are not subscribed to ${month || 'this month'}` });
+    }
+
+    const payload = await buildQuizStatusPayload(client, authState.student.id, sessionRow);
+    return res.json(payload);
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to load quiz status: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authState = await getStudentFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status || 401).json({ error: authState.error });
+    }
+
+    const sessionRow = await getSessionById(client, req.params.sessionId);
+    if (!sessionRow) {
+      return res.status(404).json({ error: 'Quiz session not found' });
+    }
+
+    const month = normalizeMonthCode(sessionRow.month_code);
+    if (!month || !authState.allowedMonths.includes(month)) {
+      return res.status(403).json({ error: `You are not subscribed to ${month || 'this month'}` });
+    }
+
+    const answers = Array.isArray(req.body?.answers) ? req.body.answers : null;
+    const timeTakenSeconds = Number(req.body?.timeTakenSeconds);
+
+    if (!answers) {
+      return res.status(400).json({ error: 'answers must be an array' });
+    }
+    if (!Number.isFinite(timeTakenSeconds) || timeTakenSeconds < 0) {
+      return res.status(400).json({ error: 'timeTakenSeconds must be a non-negative number' });
+    }
+
+    const questions = await getQuizQuestions(client, sessionRow.id);
+    if (questions.length === 0) {
+      return res.status(404).json({ error: 'This session does not have a quiz yet' });
+    }
+    if (answers.length !== questions.length) {
+      return res.status(400).json({ error: `answers length must equal ${questions.length}` });
+    }
+
+    const normalizedAnswers = answers.map((value, index) => {
+      if (value === null) return null;
+      if (!Number.isInteger(value)) {
+        throw new Error(`Answer at index ${index} must be an integer or null`);
+      }
+      const optionIndex = Number(value);
+      const optionsCount = Number(questions[index].options_count) || 0;
+      if (optionIndex < 0 || optionIndex >= optionsCount) {
+        throw new Error(`Answer at index ${index} is out of range`);
+      }
+      return optionIndex;
+    });
+
+    const unanswered = normalizedAnswers.some((value) => value === null);
+    if (unanswered) {
+      return res.status(400).json({ error: 'You have unanswered questions. Please complete the quiz before submitting.' });
+    }
+
+    let score = 0;
+    for (let i = 0; i < questions.length; i += 1) {
+      if (normalizedAnswers[i] === Number(questions[i].correct_option_index)) {
+        score += Number(questions[i].points) || 0;
+      }
+    }
+
+    await client.query('BEGIN');
+
+    const existing = await client.query(
+      `SELECT id
+       FROM quiz_results
+       WHERE student_id = $1 AND session_id = $2
+       LIMIT 1`,
+      [authState.student.id, sessionRow.id],
+    );
+    if (existing.rowCount > 0) {
+      await client.query('ROLLBACK');
+      const payload = await buildQuizStatusPayload(client, authState.student.id, sessionRow);
+      return res.status(409).json({
+        error: 'Quiz already submitted for this session',
+        ...payload,
+      });
+    }
+
+    await client.query(
+      `INSERT INTO quiz_results (
+        student_id,
+        session_id,
+        score,
+        total_questions,
+        student_answers,
+        time_taken_seconds
+      ) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+      [
+        authState.student.id,
+        sessionRow.id,
+        score,
+        questions.length,
+        JSON.stringify(normalizedAnswers),
+        Math.floor(timeTakenSeconds),
+      ],
+    );
+
+    await client.query('COMMIT');
+
+    const payload = await buildQuizStatusPayload(client, authState.student.id, sessionRow);
+    return res.status(201).json(payload);
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore rollback errors
+    }
+    return res.status(500).json({ error: `Failed to submit quiz: ${error.message}` });
   } finally {
     client.release();
   }
