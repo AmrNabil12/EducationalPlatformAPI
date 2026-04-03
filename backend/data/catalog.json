@@ -1,0 +1,41 @@
+{
+  "generatedAt": "2026-03-16T16:42:14.961865+00:00",
+  "videos": [
+    {
+      "id": "87a5e79f-3a21-4838-9395-1bce282137bb",
+      "title": "M1S1 Math Record",
+      "month": "M1",
+      "session": "S1",
+      "sourceFile": "(Record) M1 S1 Math.mp4",
+      "durationSec": null,
+      "encryption": {
+        "algorithm": "AES-256-GCM",
+        "nonceB64": "",
+        "keyWrap": {
+          "algorithm": "AES-256-GCM",
+          "nonceB64": "H5vB6wApcIiI/zz8",
+          "wrappedKeyB64": "OyF70uDbH5UBZszMyksY6T/gV0C7/LTUYt35CaqH0Y5ZyT72Agl1vabfQcWx7pEL"
+        }
+      },
+      "storage": {
+        "mode": "paged",
+        "relativePath": "encrypted/M1/S1/(Record) M1 S1 Math.mp4.enc",
+        "totalPlainSize": 247786058,
+        "pageSize": 1048576,
+        "pageCount": 237
+      },
+      "createdAt": "2026-03-16T16:42:14.960562+00:00"
+    }
+  ],
+  "pdfs": [
+    {
+      "id": "pdf-m1-s1-math",
+      "title": "M1S1 Math PDF",
+      "month": "M1",
+      "session": "S1",
+      "storage": {
+        "relativePath": "encrypted/M1/S1/M1S1 PDF"
+      }
+    }
+  ]
+}

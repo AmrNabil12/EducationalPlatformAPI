@@ -1,0 +1,13 @@
+# Ignore everything by default
+/*
+
+# Allow only the backend folder and its contents
+!/backend/
+
+# Except for these specific backend items
+backend/.env
+backend/node_modules/
+backend/*.log
+
+# Allow the gitignore itself
+!/.gitignore

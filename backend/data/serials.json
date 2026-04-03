@@ -1,0 +1,193 @@
+{
+  "serials": [
+    {
+      "serial": "EDU-TEST-2026-ABCD",
+      "active": true,
+      "boundDeviceId": "f0298089-0753-4a35-a836-44826a4ae102",
+      "publicKeyPem": "-----BEGIN RSA PUBLIC KEY-----\nMIIBCgKCAQEAlmfLap4v8cI1Lg2gAAkcjfasgbAq5ay/0rwnjLMTgp7pdgwY4X96\nFMwsrzLnEcHmXalV3tucVx0ah5w0m2O/Wn21qXVDpTUl4CHwDejFpfeEZv2wR47k\nZ5jZHdXkYF+6Y2dGk1isN6HuhhaUopxtADewMddOzXDmCS/E+5b7rMqLH8oSstIM\n+V4Zl4tDAJsTjeNkX1wWvTHP4rGS0+hj9Mdoc3xItMmEMf8TGhDFimx8rNaKfMbN\nphIqzuor5OYxPlYSxt1w7kz7lc652aVfxVAWLZIeHFg2tMybIOmPEwjzNqKZXmHs\nBOuGKnQAD6HMZ8B0YqWALMheuhccp5Y7owIDAQAB\n-----END RSA PUBLIC KEY-----",
+      "createdAt": "2026-03-15T15:31:00.000Z",
+      "boundAt": "2026-03-15T15:40:46.688Z",
+      "lastLoginAt": "2026-03-15T19:38:51.313Z"
+    },
+    {
+      "serial": "EDU-MJDD-VKRW-4H94",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-Z9FJ-KDR8-BZSG",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-HKR9-STDN-QDWD",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-LZW6-DVCD-GPAW",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-FTC4-GRNJ-3MDR",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-5CWN-M2A2-GM4R",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-PUD2-Q9S5-5NQU",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-U8L7-QMFK-ANXG",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-T8XS-T88R-PT8U",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-3HB2-FETF-HNZV",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-Q5V3-QCYC-U9JB",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-D7NP-C8XE-H73R",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-N5F7-M44W-5PR2",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-EPXS-46U2-ERVP",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-V7XP-R5N5-7UN4",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-7RBV-7P7L-YGFX",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-AZ33-9V2K-NAPH",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-9GRB-FJUL-ZUGW",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-CJ2G-WYAZ-9JN5",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    },
+    {
+      "serial": "EDU-BLRG-Z5LJ-TJ5G",
+      "active": true,
+      "boundDeviceId": null,
+      "publicKeyPem": null,
+      "createdAt": "2026-03-16T01:10:00.000Z",
+      "boundAt": null,
+      "lastLoginAt": null
+    }
+  ]
+}
