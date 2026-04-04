@@ -507,14 +507,31 @@ function encryptJsonForStudent(publicKeyPem, payload) {
   };
 }
 
-async function buildFolderQuizDefinition(quizSessionConfig) {
+function buildFolderQuizMetadataDefinition(quizSessionConfig) {
   const metadata = normalizeQuizMetadata(quizSessionConfig.encrypted_metadata);
+  const questions = metadata.map((entry, index) => ({
+    index,
+    questionNumber: entry.questionNumber,
+    options: entry.options,
+    correctOptionIndex: entry.correctOptionIndex,
+    points: entry.points,
+  }));
+
+  return {
+    questionCount: questions.length,
+    totalPoints: questions.reduce((sum, question) => sum + (Number(question.points) || 0), 0),
+    questions,
+  };
+}
+
+async function buildFolderQuizDefinition(quizSessionConfig) {
+  const metadataDefinition = buildFolderQuizMetadataDefinition(quizSessionConfig);
   const files = await fetchQuizFolderFiles(quizSessionConfig);
-  if (files.length !== metadata.length) {
-    throw new Error(`Quiz folder image count (${files.length}) does not match metadata count (${metadata.length})`);
+  if (files.length !== metadataDefinition.questions.length) {
+    throw new Error(`Quiz folder image count (${files.length}) does not match metadata count (${metadataDefinition.questions.length})`);
   }
 
-  const questions = metadata.map((entry, index) => ({
+  const questions = metadataDefinition.questions.map((entry, index) => ({
     index,
     questionNumber: entry.questionNumber,
     fileId: files[index].id,
@@ -569,35 +586,7 @@ function mapQuizQuestionForReview(question, studentAnswers, index) {
 async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPem = '') {
   const quizSessionConfig = await getQuizSessionConfig(client, sessionRow.id);
   if (quizSessionConfig) {
-    const definition = await buildFolderQuizDefinition(quizSessionConfig);
-    if (!publicKeyPem) {
-      throw new Error('Missing student public key for encrypted quiz metadata');
-    }
-    const encryptedPackage = encryptJsonForStudent(publicKeyPem, {
-      version: 1,
-      sessionId: String(sessionRow.id),
-      month: String(sessionRow.month_code || ''),
-      session: String(sessionRow.session_code || ''),
-      questions: definition.questions.map((question) => ({
-        q: question.questionNumber,
-        options: question.options,
-        correct: question.correctOptionIndex,
-        points: question.points,
-      })),
-    });
-    const sync = {
-      driveFolderId: String(quizSessionConfig.drive_folder_id || ''),
-      appsScriptUrl: String(QUIZ_APP_SCRIPT_URL || ''),
-      imageAssets: definition.questions.map((question) => ({
-        index: question.index,
-        fileName: String(question.fileName || ''),
-        imageUrl: String(question.imageUrl || ''),
-        imageDownloadUrl: createGoogleDriveDownloadUrl(question.fileId),
-      })),
-      encryptedMetadataB64: encryptedPackage.encryptedPackageB64,
-      encryptedMetadataKeyB64: encryptedPackage.encryptedPackageKeyB64,
-      metadataNonceB64: encryptedPackage.packageNonceB64,
-    };
+    const definition = buildFolderQuizMetadataDefinition(quizSessionConfig);
     const result = await client.query(
       `SELECT id, score, total_questions, student_answers, time_taken_seconds, created_at
        FROM quiz_results
@@ -615,10 +604,8 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
         sessionId: String(sessionRow.id),
         month: String(sessionRow.month_code || ''),
         session: String(sessionRow.session_code || ''),
-        sync,
         totalQuestions: definition.questionCount,
         totalPoints: definition.totalPoints,
-        questions: definition.questions.map(mapFolderQuizQuestionForPlayer),
       };
     }
 
@@ -631,7 +618,8 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
       sessionId: String(sessionRow.id),
       month: String(sessionRow.month_code || ''),
       session: String(sessionRow.session_code || ''),
-      sync,
+      totalQuestions: definition.questionCount,
+      totalPoints: definition.totalPoints,
       result: {
         id: String(row.id),
         score: Number(row.score) || 0,
@@ -641,17 +629,6 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
         timeTakenSeconds: Number(row.time_taken_seconds) || 0,
         createdAt: row.created_at,
       },
-      questions: definition.questions.map((question, index) => ({
-        id: `folder-question-${question.index + 1}`,
-        imageUrl: String(question.imageUrl || ''),
-        imageFileName: String(question.fileName || ''),
-        imageDownloadUrl: createGoogleDriveDownloadUrl(question.fileId),
-        optionsCount: Array.isArray(question.options) ? question.options.length : 0,
-        points: Number(question.points) || 0,
-        studentChoiceIndex: Number.isInteger(studentAnswers[index]) ? Number(studentAnswers[index]) : null,
-        correctOptionIndex: Number(question.correctOptionIndex),
-        isCorrect: Number.isInteger(studentAnswers[index]) && Number(studentAnswers[index]) === Number(question.correctOptionIndex),
-      })),
     };
   }
 
@@ -699,6 +676,70 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
       createdAt: row.created_at,
     },
     questions: questions.map((question, index) => mapQuizQuestionForReview(question, studentAnswers, index)),
+  };
+}
+
+async function buildQuizContentPayload(client, sessionRow, publicKeyPem = '') {
+  const quizSessionConfig = await getQuizSessionConfig(client, sessionRow.id);
+  if (quizSessionConfig) {
+    const definition = await buildFolderQuizDefinition(quizSessionConfig);
+    if (!publicKeyPem) {
+      throw new Error('Missing student public key for encrypted quiz metadata');
+    }
+
+    const encryptedPackage = encryptJsonForStudent(publicKeyPem, {
+      version: 1,
+      sessionId: String(sessionRow.id),
+      month: String(sessionRow.month_code || ''),
+      session: String(sessionRow.session_code || ''),
+      questions: definition.questions.map((question) => ({
+        q: question.questionNumber,
+        options: question.options,
+        correct: question.correctOptionIndex,
+        points: question.points,
+      })),
+    });
+
+    return {
+      hasQuiz: definition.questionCount > 0,
+      attempted: false,
+      deliveryMode: 'folder_sync',
+      sessionId: String(sessionRow.id),
+      month: String(sessionRow.month_code || ''),
+      session: String(sessionRow.session_code || ''),
+      totalQuestions: definition.questionCount,
+      totalPoints: definition.totalPoints,
+      questions: definition.questions.map(mapFolderQuizQuestionForPlayer),
+      sync: {
+        driveFolderId: String(quizSessionConfig.drive_folder_id || ''),
+        appsScriptUrl: String(QUIZ_APP_SCRIPT_URL || ''),
+        imageAssets: definition.questions.map((question) => ({
+          index: question.index,
+          fileName: String(question.fileName || ''),
+          imageUrl: String(question.imageUrl || ''),
+          imageDownloadUrl: createGoogleDriveDownloadUrl(question.fileId),
+        })),
+        encryptedMetadataB64: encryptedPackage.encryptedPackageB64,
+        encryptedMetadataKeyB64: encryptedPackage.encryptedPackageKeyB64,
+        metadataNonceB64: encryptedPackage.packageNonceB64,
+      },
+    };
+  }
+
+  const questions = await getQuizQuestions(client, sessionRow.id);
+  const questionCount = questions.length;
+  const totalPoints = questions.reduce((sum, question) => sum + (Number(question.points) || 0), 0);
+
+  return {
+    hasQuiz: questionCount > 0,
+    attempted: false,
+    deliveryMode: 'legacy',
+    sessionId: String(sessionRow.id),
+    month: String(sessionRow.month_code || ''),
+    session: String(sessionRow.session_code || ''),
+    totalQuestions: questionCount,
+    totalPoints,
+    questions: questions.map(mapQuizQuestionForPlayer),
   };
 }
 
@@ -1247,6 +1288,37 @@ app.get('/quiz/status/:sessionId', authMiddleware, async (req, res) => {
   }
 });
 
+app.get('/quiz/content/:sessionId', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authState = await getStudentFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status || 401).json({ error: authState.error });
+    }
+
+    const sessionRow = await getSessionById(client, req.params.sessionId);
+    if (!sessionRow) {
+      return res.status(404).json({ error: 'Quiz session not found' });
+    }
+
+    const month = normalizeMonthCode(sessionRow.month_code);
+    if (!month || !authState.allowedMonths.includes(month)) {
+      return res.status(403).json({ error: `You are not subscribed to ${month || 'this month'}` });
+    }
+
+    const payload = await buildQuizContentPayload(
+      client,
+      sessionRow,
+      String(authState.student.public_key_pem || '').trim(),
+    );
+    return res.json(payload);
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to load quiz content: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1281,7 +1353,7 @@ app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
     let score = 0;
 
     if (quizSessionConfig) {
-      const definition = await buildFolderQuizDefinition(quizSessionConfig);
+      const definition = buildFolderQuizMetadataDefinition(quizSessionConfig);
       totalQuestions = definition.questions.length;
       if (totalQuestions === 0) {
         return res.status(404).json({ error: 'This session does not have a quiz yet' });
