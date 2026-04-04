@@ -421,7 +421,8 @@ function httpsGetJsonByAbsoluteUrl(rawUrl) {
 
 async function fetchQuizFolderFiles(quizSessionConfig) {
   const baseUrl = String(QUIZ_APPS_SCRIPT_URL || '').trim();
-  const folderId = String(quizSessionConfig?.drive_folder_id || '').trim();
+  const rawFolderValue = String(quizSessionConfig?.drive_folder_id || '').trim();
+  const folderId = extractGoogleDriveId(rawFolderValue) || rawFolderValue;
   if (!baseUrl || !folderId) {
     throw new Error('Quiz session is missing QUIZ_APPS_SCRIPT_URL or drive_folder_id');
   }
