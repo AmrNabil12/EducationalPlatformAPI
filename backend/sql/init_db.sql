@@ -6,6 +6,11 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS student_serials (
   id BIGSERIAL PRIMARY KEY,
   serial_no TEXT NOT NULL UNIQUE,
+  full_name TEXT NULL,
+  gender TEXT NULL,
+  phone_number TEXT NULL,
+  parent_phone_number TEXT NULL,
+  email TEXT NULL,
   device_id TEXT NULL,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   -- CSV format expected by backend: e.g. "M1,M2,M4,M6"
@@ -16,6 +21,21 @@ CREATE TABLE IF NOT EXISTS student_serials (
   bound_at TIMESTAMPTZ NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE student_serials
+  ADD COLUMN IF NOT EXISTS full_name TEXT NULL;
+
+ALTER TABLE student_serials
+  ADD COLUMN IF NOT EXISTS gender TEXT NULL;
+
+ALTER TABLE student_serials
+  ADD COLUMN IF NOT EXISTS phone_number TEXT NULL;
+
+ALTER TABLE student_serials
+  ADD COLUMN IF NOT EXISTS parent_phone_number TEXT NULL;
+
+ALTER TABLE student_serials
+  ADD COLUMN IF NOT EXISTS email TEXT NULL;
 
 -- 2) Create the UNIQUE index AFTER the table exists
 -- This ensures one device cannot hijack multiple serials

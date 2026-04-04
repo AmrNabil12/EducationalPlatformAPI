@@ -107,6 +107,25 @@ function normalizeSerial(serial) {
   return String(serial || '').trim().toUpperCase();
 }
 
+function normalizeName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function normalizeGender(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'male' || normalized === 'female' ? normalized : '';
+}
+
+function normalizePhoneNumber(value) {
+  const normalized = String(value || '').trim();
+  return /^01[0125]\d{8}$/.test(normalized) ? normalized : '';
+}
+
+function normalizeGmailAddress(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return /^[a-z0-9._%+-]+@gmail\.com$/.test(normalized) ? normalized : '';
+}
+
 function normalizeAllowedMonths(value) {
   let tokens = [];
 
@@ -208,7 +227,7 @@ function authMiddleware(req, res, next) {
 
 async function getStudentBySerial(client, serial) {
   const result = await client.query(
-    `SELECT id, serial_no, device_id, active, allowed_months, public_key_pem
+    `SELECT id, serial_no, full_name, gender, phone_number, parent_phone_number, email, device_id, active, allowed_months, public_key_pem
      FROM "${studentTable}"
      WHERE UPPER(serial_no) = UPPER($1)
      LIMIT 1`,
@@ -1086,6 +1105,77 @@ app.get('/health', async (_req, res) => {
     return res.json({ ok: true, db: db.rows[0]?.ok === 1 });
   } catch {
     return res.status(500).json({ ok: false, db: false });
+  }
+});
+
+app.post('/auth/signup', async (req, res) => {
+  const serial = normalizeSerial(req.body.serial);
+  const fullName = normalizeName(req.body.name);
+  const gender = normalizeGender(req.body.gender);
+  const phoneNumber = normalizePhoneNumber(req.body.phoneNumber);
+  const parentPhoneNumber = normalizePhoneNumber(req.body.parentPhoneNumber);
+  const email = normalizeGmailAddress(req.body.email);
+
+  if (!fullName) {
+    return res.status(400).json({ error: 'name is required' });
+  }
+  if (!serial) {
+    return res.status(400).json({ error: 'serial is required' });
+  }
+  if (!gender) {
+    return res.status(400).json({ error: 'gender must be either male or female' });
+  }
+  if (!phoneNumber) {
+    return res.status(400).json({ error: 'phoneNumber must match 01[0|1|2|5]XXXXXXXX' });
+  }
+  if (!parentPhoneNumber) {
+    return res.status(400).json({ error: 'parentPhoneNumber must match 01[0|1|2|5]XXXXXXXX' });
+  }
+  if (!email) {
+    return res.status(400).json({ error: 'email must be a valid gmail address' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const existing = await getStudentBySerial(client, serial);
+    if (existing) {
+      return res.status(409).json({ error: 'This serial number is already registered' });
+    }
+
+    await client.query(
+      `INSERT INTO "${studentTable}" (
+        serial_no,
+        full_name,
+        gender,
+        phone_number,
+        parent_phone_number,
+        email
+      ) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        serial,
+        fullName,
+        gender,
+        phoneNumber,
+        parentPhoneNumber,
+        email,
+      ],
+    );
+
+    return res.status(201).json({
+      message: 'Sign up successful',
+      student: {
+        serial,
+        fullName,
+        gender,
+        phoneNumber,
+        parentPhoneNumber,
+        email,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Sign-up query failed: ${error.message}` });
+  } finally {
+    client.release();
   }
 });
 
