@@ -399,6 +399,7 @@ function httpsGetJsonByAbsoluteUrl(rawUrl) {
     const url = new URL(rawUrl);
     const request = https.get(url, (response) => {
       let body = '';
+      const contentType = String(response.headers['content-type'] || '').toLowerCase();
       response.setEncoding('utf8');
       response.on('data', (chunk) => {
         body += chunk;
@@ -408,10 +409,26 @@ function httpsGetJsonByAbsoluteUrl(rawUrl) {
           reject(new Error(`Request failed with status ${response.statusCode}`));
           return;
         }
+
+        const trimmedBody = String(body || '').trim();
+        const normalizedBody = trimmedBody.replace(/^\)\]\}'\s*/, '');
+
+        if (!normalizedBody) {
+          resolve([]);
+          return;
+        }
+
+        if (contentType.includes('text/html') || normalizedBody.startsWith('<!DOCTYPE html') || normalizedBody.startsWith('<html')) {
+          const snippet = normalizedBody.replace(/\s+/g, ' ').slice(0, 180);
+          reject(new Error(`Quiz Apps Script returned HTML instead of JSON. Check that QUIZ_APP_SCRIPT_URL is deployed as a public Web App and that drive_folder_id is valid. Response snippet: ${snippet}`));
+          return;
+        }
+
         try {
-          resolve(body ? JSON.parse(body) : []);
+          resolve(JSON.parse(normalizedBody));
         } catch {
-          reject(new Error('Invalid JSON returned from quiz Apps Script URL'));
+          const snippet = normalizedBody.replace(/\s+/g, ' ').slice(0, 180);
+          reject(new Error(`Invalid JSON returned from quiz Apps Script URL. Check the Apps Script response format. Response snippet: ${snippet}`));
         }
       });
     });
