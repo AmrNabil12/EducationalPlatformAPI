@@ -335,7 +335,7 @@ async function getQuizQuestions(client, sessionId) {
 
 async function getQuizSessionConfig(client, sessionId) {
   const result = await client.query(
-    `SELECT id, session_id, drive_folder_id, apps_script_url, encrypted_metadata, question_count, created_at, updated_at
+    `SELECT id, session_id, drive_folder_id, encrypted_metadata, question_count, created_at, updated_at
      FROM quiz_sessions
      WHERE session_id = $1
      LIMIT 1`,
@@ -420,10 +420,10 @@ function httpsGetJsonByAbsoluteUrl(rawUrl) {
 }
 
 async function fetchQuizFolderFiles(quizSessionConfig) {
-  const baseUrl = String(quizSessionConfig?.apps_script_url || QUIZ_APPS_SCRIPT_URL || '').trim();
+  const baseUrl = String(QUIZ_APPS_SCRIPT_URL || '').trim();
   const folderId = String(quizSessionConfig?.drive_folder_id || '').trim();
   if (!baseUrl || !folderId) {
-    throw new Error('Quiz session is missing apps_script_url or drive_folder_id');
+    throw new Error('Quiz session is missing QUIZ_APPS_SCRIPT_URL or drive_folder_id');
   }
 
   const url = new URL(baseUrl);
@@ -550,7 +550,7 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
     });
     const sync = {
       driveFolderId: String(quizSessionConfig.drive_folder_id || ''),
-      appsScriptUrl: String(quizSessionConfig.apps_script_url || QUIZ_APPS_SCRIPT_URL || ''),
+      appsScriptUrl: String(QUIZ_APPS_SCRIPT_URL || ''),
       imageAssets: definition.questions.map((question) => ({
         index: question.index,
         fileName: String(question.fileName || ''),
