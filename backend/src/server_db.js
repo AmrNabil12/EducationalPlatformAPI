@@ -394,7 +394,7 @@ function createGoogleDriveViewUrl(fileId) {
   return `https://drive.google.com/uc?export=view&id=${encodeURIComponent(normalizedFileId)}`;
 }
 
-function httpsGetJsonByAbsoluteUrl(rawUrl) {
+function httpsGetJsonByAbsoluteUrl(rawUrl, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     const url = new URL(rawUrl);
     const request = https.get(url, (response) => {
@@ -405,6 +405,22 @@ function httpsGetJsonByAbsoluteUrl(rawUrl) {
         body += chunk;
       });
       response.on('end', () => {
+        if (response.statusCode >= 300 && response.statusCode < 400) {
+          const location = String(response.headers.location || '').trim();
+          if (!location) {
+            reject(new Error(`Quiz Apps Script redirect (${response.statusCode}) did not include a location header`));
+            return;
+          }
+          if (redirectCount >= 5) {
+            reject(new Error('Quiz Apps Script redirected too many times'));
+            return;
+          }
+
+          const nextUrl = new URL(location, url).toString();
+          resolve(httpsGetJsonByAbsoluteUrl(nextUrl, redirectCount + 1));
+          return;
+        }
+
         if (response.statusCode >= 400) {
           reject(new Error(`Request failed with status ${response.statusCode}`));
           return;
