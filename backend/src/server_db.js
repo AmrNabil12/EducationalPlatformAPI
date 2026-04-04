@@ -1138,49 +1138,31 @@ app.post('/auth/signup', async (req, res) => {
   const client = await pool.connect();
   try {
     const existing = await getStudentBySerial(client, serial);
+    if (!existing) {
+      return res.status(404).json({ error: 'Serial number not found' });
+    }
     if (existing?.active === false) {
       return res.status(403).json({ error: 'This serial is inactive' });
     }
 
-    if (existing) {
-      await client.query(
-        `UPDATE "${studentTable}"
-         SET full_name = $1,
-             gender = $2,
-             phone_number = $3,
-             parent_phone_number = $4,
-             email = $5,
-             updated_at = NOW()
-         WHERE UPPER(serial_no) = UPPER($6)`,
-        [
-          fullName,
-          gender,
-          phoneNumber,
-          parentPhoneNumber,
-          email,
-          serial,
-        ],
-      );
-    } else {
-      await client.query(
-        `INSERT INTO "${studentTable}" (
-          serial_no,
-          full_name,
-          gender,
-          phone_number,
-          parent_phone_number,
-          email
-        ) VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          serial,
-          fullName,
-          gender,
-          phoneNumber,
-          parentPhoneNumber,
-          email,
-        ],
-      );
-    }
+    await client.query(
+      `UPDATE "${studentTable}"
+       SET full_name = $1,
+           gender = $2,
+           phone_number = $3,
+           parent_phone_number = $4,
+           email = $5,
+           updated_at = NOW()
+       WHERE UPPER(serial_no) = UPPER($6)`,
+      [
+        fullName,
+        gender,
+        phoneNumber,
+        parentPhoneNumber,
+        email,
+        serial,
+      ],
+    );
 
     return res.status(201).json({
       message: 'Sign up successful',
