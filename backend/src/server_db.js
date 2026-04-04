@@ -68,7 +68,7 @@ const GOOGLE_DRIVE_ROOT_FOLDER = String(
 ).trim();
 const GOOGLE_DRIVE_API_KEY = String(process.env.GOOGLE_DRIVE_API_KEY || '').trim();
 const GOOGLE_DRIVE_ACCESS_TOKEN = String(process.env.GOOGLE_DRIVE_ACCESS_TOKEN || '').trim();
-const QUIZ_APPS_SCRIPT_URL = String(process.env.QUIZ_APPS_SCRIPT_URL || '').trim();
+const QUIZ_APP_SCRIPT_URL = String(process.env.QUIZ_APP_SCRIPT_URL || '').trim();
 
 const STUDENT_SERIALS_TABLE = process.env.STUDENT_SERIALS_TABLE || 'student_serials';
 const MATH_RECORDS_TABLE = process.env.MATH_RECORDS_TABLE || 'math_records';
@@ -420,11 +420,11 @@ function httpsGetJsonByAbsoluteUrl(rawUrl) {
 }
 
 async function fetchQuizFolderFiles(quizSessionConfig) {
-  const baseUrl = String(QUIZ_APPS_SCRIPT_URL || '').trim();
+  const baseUrl = String(QUIZ_APP_SCRIPT_URL || '').trim();
   const rawFolderValue = String(quizSessionConfig?.drive_folder_id || '').trim();
   const folderId = extractGoogleDriveId(rawFolderValue) || rawFolderValue;
   if (!baseUrl || !folderId) {
-    throw new Error('Quiz session is missing QUIZ_APPS_SCRIPT_URL or drive_folder_id');
+    throw new Error('Quiz session is missing QUIZ_APP_SCRIPT_URL or drive_folder_id');
   }
 
   const url = new URL(baseUrl);
@@ -551,7 +551,7 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
     });
     const sync = {
       driveFolderId: String(quizSessionConfig.drive_folder_id || ''),
-      appsScriptUrl: String(QUIZ_APPS_SCRIPT_URL || ''),
+      appsScriptUrl: String(QUIZ_APP_SCRIPT_URL || ''),
       imageAssets: definition.questions.map((question) => ({
         index: question.index,
         fileName: String(question.fileName || ''),
