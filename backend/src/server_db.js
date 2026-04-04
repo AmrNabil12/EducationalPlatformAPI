@@ -461,7 +461,10 @@ async function fetchQuizFolderFiles(quizSessionConfig) {
   }
 
   const url = new URL(baseUrl);
-  url.searchParams.set('folderId', folderId);
+  const host = url.hostname.toLowerCase();
+  if (host.includes('script.google.com')) {
+    url.searchParams.set('folderId', folderId);
+  }
   const fileList = await httpsGetJsonByAbsoluteUrl(url.toString());
   if (!Array.isArray(fileList)) {
     throw new Error('Quiz Apps Script did not return an array');
