@@ -68,6 +68,7 @@ const GOOGLE_DRIVE_ROOT_FOLDER = String(
 ).trim();
 const GOOGLE_DRIVE_API_KEY = String(process.env.GOOGLE_DRIVE_API_KEY || '').trim();
 const GOOGLE_DRIVE_ACCESS_TOKEN = String(process.env.GOOGLE_DRIVE_ACCESS_TOKEN || '').trim();
+const QUIZ_APPS_SCRIPT_URL = String(process.env.QUIZ_APPS_SCRIPT_URL || '').trim();
 
 const STUDENT_SERIALS_TABLE = process.env.STUDENT_SERIALS_TABLE || 'student_serials';
 const MATH_RECORDS_TABLE = process.env.MATH_RECORDS_TABLE || 'math_records';
@@ -332,11 +333,184 @@ async function getQuizQuestions(client, sessionId) {
   return result.rows;
 }
 
+async function getQuizSessionConfig(client, sessionId) {
+  const result = await client.query(
+    `SELECT id, session_id, drive_folder_id, apps_script_url, encrypted_metadata, question_count, created_at, updated_at
+     FROM quiz_sessions
+     WHERE session_id = $1
+     LIMIT 1`,
+    [sessionId],
+  );
+  return result.rows[0] || null;
+}
+
+async function loadQuizEnabledSessionIds(client) {
+  const result = await client.query(
+    `SELECT session_id::text AS session_id FROM quiz_sessions
+     UNION
+     SELECT DISTINCT session_id::text AS session_id FROM quiz_questions`,
+  );
+  return new Set(result.rows.map((row) => String(row.session_id || '')));
+}
+
+function normalizeQuizMetadata(rawValue) {
+  if (!rawValue) return [];
+  let parsed = rawValue;
+  if (typeof rawValue === 'string') {
+    parsed = JSON.parse(rawValue);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('Quiz metadata must be a JSON array');
+  }
+
+  return parsed.map((entry, index) => {
+    const options = Array.isArray(entry?.options)
+      ? entry.options.map((option) => String(option ?? '').trim())
+      : [];
+    const correctOptionIndex = Number.isInteger(entry?.correct)
+      ? Number(entry.correct)
+      : Number.isInteger(entry?.correctOptionIndex)
+        ? Number(entry.correctOptionIndex)
+        : -1;
+    const points = Number(entry?.points ?? 1);
+    if (options.length < 2) {
+      throw new Error(`Quiz metadata item ${index + 1} must have at least 2 options`);
+    }
+    if (correctOptionIndex < 0 || correctOptionIndex >= options.length) {
+      throw new Error(`Quiz metadata item ${index + 1} has invalid correct option index`);
+    }
+    return {
+      questionNumber: Number(entry?.q ?? index + 1) || index + 1,
+      options,
+      correctOptionIndex,
+      points: Number.isFinite(points) && points >= 0 ? points : 1,
+    };
+  });
+}
+
+function createGoogleDriveViewUrl(fileId) {
+  const normalizedFileId = String(fileId || '').trim();
+  if (!normalizedFileId) return '';
+  return `https://drive.google.com/uc?export=view&id=${encodeURIComponent(normalizedFileId)}`;
+}
+
+function httpsGetJsonByAbsoluteUrl(rawUrl) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(rawUrl);
+    const request = https.get(url, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        body += chunk;
+      });
+      response.on('end', () => {
+        if (response.statusCode >= 400) {
+          reject(new Error(`Request failed with status ${response.statusCode}`));
+          return;
+        }
+        try {
+          resolve(body ? JSON.parse(body) : []);
+        } catch {
+          reject(new Error('Invalid JSON returned from quiz Apps Script URL'));
+        }
+      });
+    });
+    request.on('error', reject);
+  });
+}
+
+async function fetchQuizFolderFiles(quizSessionConfig) {
+  const baseUrl = String(quizSessionConfig?.apps_script_url || QUIZ_APPS_SCRIPT_URL || '').trim();
+  const folderId = String(quizSessionConfig?.drive_folder_id || '').trim();
+  if (!baseUrl || !folderId) {
+    throw new Error('Quiz session is missing apps_script_url or drive_folder_id');
+  }
+
+  const url = new URL(baseUrl);
+  url.searchParams.set('folderId', folderId);
+  const fileList = await httpsGetJsonByAbsoluteUrl(url.toString());
+  if (!Array.isArray(fileList)) {
+    throw new Error('Quiz Apps Script did not return an array');
+  }
+
+  return fileList
+    .map((file, index) => ({
+      index,
+      name: String(file?.name || ''),
+      id: String(file?.id || ''),
+    }))
+    .filter((file) => file.name && file.id)
+    .sort((a, b) => {
+      const aNum = Number.parseInt(a.name, 10);
+      const bNum = Number.parseInt(b.name, 10);
+      if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+      return a.name.localeCompare(b.name);
+    });
+}
+
+function encryptJsonForStudent(publicKeyPem, payload) {
+  const json = JSON.stringify(payload);
+  const dataKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', dataKey, iv);
+  const encrypted = Buffer.concat([cipher.update(json, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  const encryptedKey = crypto.publicEncrypt(
+    {
+      key: publicKeyPem,
+      padding: crypto.constants.RSA_PKCS1_PADDING,
+    },
+    dataKey,
+  );
+
+  return {
+    encryptedPackageB64: Buffer.concat([encrypted, authTag]).toString('base64'),
+    encryptedPackageKeyB64: encryptedKey.toString('base64'),
+    packageNonceB64: iv.toString('base64'),
+  };
+}
+
+async function buildFolderQuizDefinition(quizSessionConfig) {
+  const metadata = normalizeQuizMetadata(quizSessionConfig.encrypted_metadata);
+  const files = await fetchQuizFolderFiles(quizSessionConfig);
+  if (files.length !== metadata.length) {
+    throw new Error(`Quiz folder image count (${files.length}) does not match metadata count (${metadata.length})`);
+  }
+
+  const questions = metadata.map((entry, index) => ({
+    index,
+    questionNumber: entry.questionNumber,
+    fileId: files[index].id,
+    fileName: files[index].name,
+    imageUrl: createGoogleDriveViewUrl(files[index].id),
+    options: entry.options,
+    correctOptionIndex: entry.correctOptionIndex,
+    points: entry.points,
+  }));
+
+  return {
+    questionCount: questions.length,
+    totalPoints: questions.reduce((sum, question) => sum + (Number(question.points) || 0), 0),
+    questions,
+  };
+}
+
 function mapQuizQuestionForPlayer(question) {
   return {
     id: String(question.id || ''),
     imageUrl: String(question.image_url || ''),
     optionsCount: Number(question.options_count) || 0,
+    points: Number(question.points) || 0,
+  };
+}
+
+function mapFolderQuizQuestionForPlayer(question) {
+  return {
+    id: `folder-question-${question.index + 1}`,
+    imageUrl: String(question.imageUrl || ''),
+    imageFileName: String(question.fileName || ''),
+    imageDownloadUrl: createGoogleDriveDownloadUrl(question.fileId),
+    optionsCount: Array.isArray(question.options) ? question.options.length : 0,
     points: Number(question.points) || 0,
   };
 }
@@ -355,7 +529,95 @@ function mapQuizQuestionForReview(question, studentAnswers, index) {
   };
 }
 
-async function buildQuizStatusPayload(client, studentId, sessionRow) {
+async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPem = '') {
+  const quizSessionConfig = await getQuizSessionConfig(client, sessionRow.id);
+  if (quizSessionConfig) {
+    const definition = await buildFolderQuizDefinition(quizSessionConfig);
+    if (!publicKeyPem) {
+      throw new Error('Missing student public key for encrypted quiz metadata');
+    }
+    const encryptedPackage = encryptJsonForStudent(publicKeyPem, {
+      version: 1,
+      sessionId: String(sessionRow.id),
+      month: String(sessionRow.month_code || ''),
+      session: String(sessionRow.session_code || ''),
+      questions: definition.questions.map((question) => ({
+        q: question.questionNumber,
+        options: question.options,
+        correct: question.correctOptionIndex,
+        points: question.points,
+      })),
+    });
+    const sync = {
+      driveFolderId: String(quizSessionConfig.drive_folder_id || ''),
+      appsScriptUrl: String(quizSessionConfig.apps_script_url || QUIZ_APPS_SCRIPT_URL || ''),
+      imageAssets: definition.questions.map((question) => ({
+        index: question.index,
+        fileName: String(question.fileName || ''),
+        imageUrl: String(question.imageUrl || ''),
+        imageDownloadUrl: createGoogleDriveDownloadUrl(question.fileId),
+      })),
+      encryptedMetadataB64: encryptedPackage.encryptedPackageB64,
+      encryptedMetadataKeyB64: encryptedPackage.encryptedPackageKeyB64,
+      metadataNonceB64: encryptedPackage.packageNonceB64,
+    };
+    const result = await client.query(
+      `SELECT id, score, total_questions, student_answers, time_taken_seconds, created_at
+       FROM quiz_results
+       WHERE student_id = $1 AND session_id = $2
+       LIMIT 1`,
+      [studentId, sessionRow.id],
+    );
+
+    const hasQuiz = definition.questionCount > 0;
+    if (result.rowCount === 0) {
+      return {
+        hasQuiz,
+        attempted: false,
+        deliveryMode: 'folder_sync',
+        sessionId: String(sessionRow.id),
+        month: String(sessionRow.month_code || ''),
+        session: String(sessionRow.session_code || ''),
+        sync,
+        totalQuestions: definition.questionCount,
+        totalPoints: definition.totalPoints,
+        questions: definition.questions.map(mapFolderQuizQuestionForPlayer),
+      };
+    }
+
+    const row = result.rows[0];
+    const studentAnswers = Array.isArray(row.student_answers) ? row.student_answers : [];
+    return {
+      hasQuiz,
+      attempted: true,
+      deliveryMode: 'folder_sync',
+      sessionId: String(sessionRow.id),
+      month: String(sessionRow.month_code || ''),
+      session: String(sessionRow.session_code || ''),
+      sync,
+      result: {
+        id: String(row.id),
+        score: Number(row.score) || 0,
+        totalQuestions: Number(row.total_questions) || 0,
+        totalPoints: definition.totalPoints,
+        studentAnswers,
+        timeTakenSeconds: Number(row.time_taken_seconds) || 0,
+        createdAt: row.created_at,
+      },
+      questions: definition.questions.map((question, index) => ({
+        id: `folder-question-${question.index + 1}`,
+        imageUrl: String(question.imageUrl || ''),
+        imageFileName: String(question.fileName || ''),
+        imageDownloadUrl: createGoogleDriveDownloadUrl(question.fileId),
+        optionsCount: Array.isArray(question.options) ? question.options.length : 0,
+        points: Number(question.points) || 0,
+        studentChoiceIndex: Number.isInteger(studentAnswers[index]) ? Number(studentAnswers[index]) : null,
+        correctOptionIndex: Number(question.correctOptionIndex),
+        isCorrect: Number.isInteger(studentAnswers[index]) && Number(studentAnswers[index]) === Number(question.correctOptionIndex),
+      })),
+    };
+  }
+
   const questions = await getQuizQuestions(client, sessionRow.id);
   const result = await client.query(
     `SELECT id, score, total_questions, student_answers, time_taken_seconds, created_at
@@ -822,6 +1084,7 @@ app.get('/videos', authMiddleware, async (req, res) => {
     const catalog = readCatalog();
     await ensureCatalogSessions(client, catalog);
     const sessionMap = await loadSessionMap(client);
+    const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client);
 
     let months = allowedMonths.map((month) => {
       // Videos
@@ -868,7 +1131,7 @@ app.get('/videos', authMiddleware, async (req, res) => {
           month,
           session: sessionCode,
           sessionId: sessionRow?.id ? String(sessionRow.id) : '',
-          hasQuiz: Boolean(sessionRow?.id),
+          hasQuiz: Boolean(sessionRow?.id && quizEnabledSessionIds.has(String(sessionRow.id))),
         };
       }).filter((quiz) => quiz.hasQuiz && quiz.sessionId);
 
@@ -900,7 +1163,9 @@ app.get('/videos', authMiddleware, async (req, res) => {
           month,
           videos,
           pdfs: [],
-          quizzes: sessionRow?.id ? [{ month, session: 'S1', sessionId: String(sessionRow.id), hasQuiz: true }] : [],
+          quizzes: sessionRow?.id && quizEnabledSessionIds.has(String(sessionRow.id))
+            ? [{ month, session: 'S1', sessionId: String(sessionRow.id), hasQuiz: true }]
+            : [],
         };
       });
     }
@@ -931,7 +1196,12 @@ app.get('/quiz/status/:sessionId', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: `You are not subscribed to ${month || 'this month'}` });
     }
 
-    const payload = await buildQuizStatusPayload(client, authState.student.id, sessionRow);
+    const payload = await buildQuizStatusPayload(
+      client,
+      authState.student.id,
+      sessionRow,
+      String(authState.student.public_key_pem || '').trim(),
+    );
     return res.json(payload);
   } catch (error) {
     return res.status(500).json({ error: `Failed to load quiz status: ${error.message}` });
@@ -968,37 +1238,72 @@ app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'timeTakenSeconds must be a non-negative number' });
     }
 
-    const questions = await getQuizQuestions(client, sessionRow.id);
-    if (questions.length === 0) {
-      return res.status(404).json({ error: 'This session does not have a quiz yet' });
-    }
-    if (answers.length !== questions.length) {
-      return res.status(400).json({ error: `answers length must equal ${questions.length}` });
-    }
+    const quizSessionConfig = await getQuizSessionConfig(client, sessionRow.id);
+    let totalQuestions = 0;
+    let normalizedAnswers = [];
+    let score = 0;
 
-    const normalizedAnswers = answers.map((value, index) => {
-      if (value === null) return null;
-      if (!Number.isInteger(value)) {
-        throw new Error(`Answer at index ${index} must be an integer or null`);
+    if (quizSessionConfig) {
+      const definition = await buildFolderQuizDefinition(quizSessionConfig);
+      totalQuestions = definition.questions.length;
+      if (totalQuestions === 0) {
+        return res.status(404).json({ error: 'This session does not have a quiz yet' });
       }
-      const optionIndex = Number(value);
-      const optionsCount = Number(questions[index].options_count) || 0;
-      if (optionIndex < 0 || optionIndex >= optionsCount) {
-        throw new Error(`Answer at index ${index} is out of range`);
+      if (answers.length !== totalQuestions) {
+        return res.status(400).json({ error: `answers length must equal ${totalQuestions}` });
       }
-      return optionIndex;
-    });
+
+      normalizedAnswers = answers.map((value, index) => {
+        if (value === null) return null;
+        if (!Number.isInteger(value)) {
+          throw new Error(`Answer at index ${index} must be an integer or null`);
+        }
+        const optionIndex = Number(value);
+        const optionsCount = definition.questions[index].options.length;
+        if (optionIndex < 0 || optionIndex >= optionsCount) {
+          throw new Error(`Answer at index ${index} is out of range`);
+        }
+        return optionIndex;
+      });
+
+      for (let i = 0; i < definition.questions.length; i += 1) {
+        if (normalizedAnswers[i] === Number(definition.questions[i].correctOptionIndex)) {
+          score += Number(definition.questions[i].points) || 0;
+        }
+      }
+    } else {
+      const questions = await getQuizQuestions(client, sessionRow.id);
+      totalQuestions = questions.length;
+      if (totalQuestions === 0) {
+        return res.status(404).json({ error: 'This session does not have a quiz yet' });
+      }
+      if (answers.length !== totalQuestions) {
+        return res.status(400).json({ error: `answers length must equal ${totalQuestions}` });
+      }
+
+      normalizedAnswers = answers.map((value, index) => {
+        if (value === null) return null;
+        if (!Number.isInteger(value)) {
+          throw new Error(`Answer at index ${index} must be an integer or null`);
+        }
+        const optionIndex = Number(value);
+        const optionsCount = Number(questions[index].options_count) || 0;
+        if (optionIndex < 0 || optionIndex >= optionsCount) {
+          throw new Error(`Answer at index ${index} is out of range`);
+        }
+        return optionIndex;
+      });
+
+      for (let i = 0; i < questions.length; i += 1) {
+        if (normalizedAnswers[i] === Number(questions[i].correct_option_index)) {
+          score += Number(questions[i].points) || 0;
+        }
+      }
+    }
 
     const unanswered = normalizedAnswers.some((value) => value === null);
     if (unanswered) {
       return res.status(400).json({ error: 'You have unanswered questions. Please complete the quiz before submitting.' });
-    }
-
-    let score = 0;
-    for (let i = 0; i < questions.length; i += 1) {
-      if (normalizedAnswers[i] === Number(questions[i].correct_option_index)) {
-        score += Number(questions[i].points) || 0;
-      }
     }
 
     await client.query('BEGIN');
@@ -1012,7 +1317,12 @@ app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
     );
     if (existing.rowCount > 0) {
       await client.query('ROLLBACK');
-      const payload = await buildQuizStatusPayload(client, authState.student.id, sessionRow);
+      const payload = await buildQuizStatusPayload(
+        client,
+        authState.student.id,
+        sessionRow,
+        String(authState.student.public_key_pem || '').trim(),
+      );
       return res.status(409).json({
         error: 'Quiz already submitted for this session',
         ...payload,
@@ -1032,7 +1342,7 @@ app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
         authState.student.id,
         sessionRow.id,
         score,
-        questions.length,
+        totalQuestions,
         JSON.stringify(normalizedAnswers),
         Math.floor(timeTakenSeconds),
       ],
@@ -1040,7 +1350,12 @@ app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
 
     await client.query('COMMIT');
 
-    const payload = await buildQuizStatusPayload(client, authState.student.id, sessionRow);
+    const payload = await buildQuizStatusPayload(
+      client,
+      authState.student.id,
+      sessionRow,
+      String(authState.student.public_key_pem || '').trim(),
+    );
     return res.status(201).json(payload);
   } catch (error) {
     try {

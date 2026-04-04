@@ -53,6 +53,21 @@ CREATE TABLE IF NOT EXISTS quiz_questions (
 CREATE INDEX IF NOT EXISTS idx_quiz_questions_session_id
   ON quiz_questions (session_id, created_at, id);
 
+-- Preferred folder-based quiz package table.
+CREATE TABLE IF NOT EXISTS quiz_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+  drive_folder_id TEXT NOT NULL,
+  apps_script_url TEXT NULL,
+  encrypted_metadata TEXT NOT NULL,
+  question_count INT NOT NULL DEFAULT 0 CHECK (question_count >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quiz_sessions_session_id
+  ON quiz_sessions (session_id);
+
 -- 4) Quiz results.
 CREATE TABLE IF NOT EXISTS quiz_results (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
