@@ -578,11 +578,13 @@ async function buildStudentDashboardPayload(client, authState, monthsPayload = n
   const totalQuizzes = quizSessionIds.length;
   const watchedVideosCount = watchedVideos.length;
   const solvedQuizzesCount = solvedQuizRows.length;
+  const isDefaultState = !hasVideoWatchHistory && solvedQuizzesCount === 0;
 
-  if (!hasVideoWatchHistory) {
+  if (isDefaultState) {
     const enrolledMonthsCount = authState.allowedMonths.length;
     return {
       generatedAt: new Date().toISOString(),
+      isDefaultState: true,
       hasVideoWatchHistory: false,
       enrolledMonthsCount,
       missingMonthsCount: Math.max(latestAvailableMonthNumber - enrolledMonthsCount, 0),
@@ -600,7 +602,8 @@ async function buildStudentDashboardPayload(client, authState, monthsPayload = n
 
   return {
     generatedAt: new Date().toISOString(),
-    hasVideoWatchHistory: true,
+    isDefaultState: false,
+    hasVideoWatchHistory,
     enrolledMonthsCount: authState.allowedMonths.length,
     missingMonthsCount,
     latestAvailableMonthNumber,
