@@ -544,6 +544,14 @@ async function buildStudentDashboardPayload(client, authState, monthsPayload = n
     months.flatMap((month) => month.quizzes.map((quiz) => String(quiz.sessionId || ''))).filter(Boolean),
   ));
 
+  const watchHistoryResult = await client.query(
+    `SELECT COUNT(*)::int AS count
+     FROM student_video_watches
+     WHERE student_id = $1`,
+    [authState.student.id],
+  );
+  const hasVideoWatchHistory = (Number(watchHistoryResult.rows[0]?.count) || 0) > 0;
+
   let watchedVideos = [];
   if (videoIds.length > 0) {
     const result = await client.query(
@@ -582,8 +590,28 @@ async function buildStudentDashboardPayload(client, authState, monthsPayload = n
   const watchedVideosCount = watchedVideos.length;
   const solvedQuizzesCount = solvedQuizRows.length;
 
+  if (!hasVideoWatchHistory) {
+    const enrolledMonthsCount = authState.allowedMonths.length;
+    return {
+      generatedAt: new Date().toISOString(),
+      hasVideoWatchHistory: false,
+      enrolledMonthsCount,
+      missingMonthsCount: Math.max(latestAvailableMonthNumber - enrolledMonthsCount, 0),
+      latestAvailableMonthNumber,
+      totalVideos,
+      watchedVideosCount: 0,
+      videoProgressPercent: 0,
+      totalQuizzes,
+      solvedQuizzesCount: 0,
+      quizProgressPercent: null,
+      performanceScorePercent: null,
+      activity: [],
+    };
+  }
+
   return {
     generatedAt: new Date().toISOString(),
+    hasVideoWatchHistory: true,
     enrolledMonthsCount: authState.allowedMonths.length,
     missingMonthsCount,
     latestAvailableMonthNumber,
