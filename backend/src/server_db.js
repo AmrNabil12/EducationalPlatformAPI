@@ -372,6 +372,232 @@ async function loadQuizEnabledSessionIds(client) {
   return new Set(result.rows.map((row) => String(row.session_id || '')));
 }
 
+function extractMonthNumber(value) {
+  const match = String(value || '').trim().toUpperCase().match(/^M(1[0-2]|[1-9])$/);
+  if (!match) return null;
+  return Number(match[1]) || null;
+}
+
+async function buildAuthorizedMonthsPayload(client, allowedMonths) {
+  const catalog = readCatalog();
+  await ensureCatalogSessions(client, catalog);
+  const sessionMap = await loadSessionMap(client);
+  const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client);
+
+  let months = allowedMonths.map((month) => {
+    const videos = catalog.videos
+      .filter((video) => String(video?.month || '').toUpperCase() === month)
+      .map((video) => ({
+        id: String(video.id || ''),
+        title: String(video.title || 'Record'),
+        month,
+        session: String(video.session || 'S1').toUpperCase(),
+        durationSec: Number.isFinite(video.durationSec) ? Number(video.durationSec) : null,
+      }))
+      .filter((video) => video.id);
+
+    const pdfs = catalog.pdfs
+      .filter((pdf) => String(pdf?.month || '').toUpperCase() === month)
+      .map((pdf) => {
+        const relativePath = String(pdf?.storage?.relativePath || '').replaceAll('\\', '/');
+        const downloadUrl = relativePath
+          ? `/pdf/${relativePath.split('/').map(encodeURIComponent).join('/')}`
+          : '';
+        return {
+          id: String(pdf.id || ''),
+          title: String(pdf.title || 'PDF'),
+          month,
+          session: String(pdf.session || 'S1').toUpperCase(),
+          downloadUrl,
+        };
+      })
+      .filter((pdf) => pdf.id && pdf.downloadUrl);
+
+    const quizSessions = new Map();
+    for (const video of videos) {
+      quizSessions.set(String(video.session || '').toUpperCase(), true);
+    }
+    for (const pdf of pdfs) {
+      quizSessions.set(String(pdf.session || '').toUpperCase(), true);
+    }
+
+    const quizzes = Array.from(quizSessions.keys()).map((sessionCode) => {
+      const sessionRow = sessionMap.get(`${month}:${sessionCode}`);
+      return {
+        month,
+        session: sessionCode,
+        sessionId: sessionRow?.id ? String(sessionRow.id) : '',
+        hasQuiz: Boolean(sessionRow?.id && quizEnabledSessionIds.has(String(sessionRow.id))),
+      };
+    }).filter((quiz) => quiz.hasQuiz && quiz.sessionId);
+
+    return { month, videos, pdfs, quizzes };
+  });
+
+  const hasCatalogVideos = months.some((month) => month.videos.length > 0);
+  if (!hasCatalogVideos) {
+    const records = await getRecordsRows(client);
+    months = allowedMonths.map((month) => {
+      const monthKey = monthColumn(month);
+      const videos = records
+        .map((record) => {
+          const url = normalizeRecordUrl(record[monthKey]);
+          if (!url) return null;
+          return {
+            id: `${month}_${record.record_no}`,
+            title: `Record ${record.record_no}`,
+            month,
+            session: 'S1',
+            durationSec: null,
+          };
+        })
+        .filter(Boolean);
+
+      const sessionRow = sessionMap.get(`${month}:S1`);
+      return {
+        month,
+        videos,
+        pdfs: [],
+        quizzes: sessionRow?.id && quizEnabledSessionIds.has(String(sessionRow.id))
+          ? [{ month, session: 'S1', sessionId: String(sessionRow.id), hasQuiz: true }]
+          : [],
+      };
+    });
+  }
+
+  return months;
+}
+
+async function getLatestAvailableMonthNumber(client) {
+  const result = await client.query('SELECT month_code FROM sessions');
+  let latest = 0;
+  for (const row of result.rows) {
+    const monthNumber = extractMonthNumber(row.month_code);
+    if (monthNumber && monthNumber > latest) latest = monthNumber;
+  }
+  return latest;
+}
+
+async function loadQuizTotalPointsMap(client, sessionIds) {
+  const totals = new Map();
+  for (const sessionId of sessionIds) {
+    if (!sessionId) continue;
+
+    const quizSessionConfig = await getQuizSessionConfig(client, sessionId);
+    if (quizSessionConfig) {
+      totals.set(sessionId, buildFolderQuizMetadataDefinition(quizSessionConfig).totalPoints);
+      continue;
+    }
+
+    const result = await client.query(
+      `SELECT COALESCE(SUM(points), 0) AS total_points
+       FROM quiz_questions
+       WHERE session_id = $1`,
+      [sessionId],
+    );
+    totals.set(sessionId, Number(result.rows[0]?.total_points) || 0);
+  }
+  return totals;
+}
+
+function buildLast30DayActivity(quizRows, videoRows) {
+  const counts = new Map();
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+
+  for (let offset = 29; offset >= 0; offset -= 1) {
+    const day = new Date(today);
+    day.setUTCDate(today.getUTCDate() - offset);
+    counts.set(day.toISOString().slice(0, 10), 0);
+  }
+
+  for (const row of [...quizRows, ...videoRows]) {
+    const key = new Date(row.activity_at).toISOString().slice(0, 10);
+    if (counts.has(key)) {
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+
+  return Array.from(counts.entries()).map(([date, count]) => ({ date, count }));
+}
+
+async function buildStudentDashboardPayload(client, authState, monthsPayload = null) {
+  const months = monthsPayload || await buildAuthorizedMonthsPayload(client, authState.allowedMonths);
+  const latestAvailableMonthNumber = await getLatestAvailableMonthNumber(client);
+  const enrolledMonthNumbers = new Set(
+    authState.allowedMonths
+      .map((month) => extractMonthNumber(month))
+      .filter((value) => Number.isInteger(value)),
+  );
+
+  let missingMonthsCount = 0;
+  for (let monthNumber = 1; monthNumber <= latestAvailableMonthNumber; monthNumber += 1) {
+    if (!enrolledMonthNumbers.has(monthNumber)) {
+      missingMonthsCount += 1;
+    }
+  }
+
+  const videoIds = Array.from(new Set(
+    months.flatMap((month) => month.videos.map((video) => String(video.id || ''))).filter(Boolean),
+  ));
+  const quizSessionIds = Array.from(new Set(
+    months.flatMap((month) => month.quizzes.map((quiz) => String(quiz.sessionId || ''))).filter(Boolean),
+  ));
+
+  let watchedVideos = [];
+  if (videoIds.length > 0) {
+    const result = await client.query(
+      `SELECT video_id, qualified_at AS activity_at
+       FROM student_video_watches
+       WHERE student_id = $1 AND video_id = ANY($2::text[])`,
+      [authState.student.id, videoIds],
+    );
+    watchedVideos = result.rows;
+  }
+
+  let solvedQuizRows = [];
+  if (quizSessionIds.length > 0) {
+    const result = await client.query(
+      `SELECT session_id::text AS session_id, score, created_at AS activity_at
+       FROM quiz_results
+       WHERE student_id = $1 AND session_id = ANY($2::uuid[])`,
+      [authState.student.id, quizSessionIds],
+    );
+    solvedQuizRows = result.rows;
+  }
+
+  const quizTotalPointsBySessionId = await loadQuizTotalPointsMap(client, quizSessionIds);
+  let performanceScorePercent = 0;
+  if (solvedQuizRows.length > 0) {
+    const percentageSum = solvedQuizRows.reduce((sum, row) => {
+      const totalPoints = Number(quizTotalPointsBySessionId.get(String(row.session_id || ''))) || 0;
+      if (totalPoints <= 0) return sum;
+      return sum + ((Number(row.score) || 0) / totalPoints) * 100;
+    }, 0);
+    performanceScorePercent = percentageSum / solvedQuizRows.length;
+  }
+
+  const totalVideos = videoIds.length;
+  const totalQuizzes = quizSessionIds.length;
+  const watchedVideosCount = watchedVideos.length;
+  const solvedQuizzesCount = solvedQuizRows.length;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    enrolledMonthsCount: authState.allowedMonths.length,
+    missingMonthsCount,
+    latestAvailableMonthNumber,
+    totalVideos,
+    watchedVideosCount,
+    videoProgressPercent: totalVideos > 0 ? (watchedVideosCount / totalVideos) * 100 : 0,
+    totalQuizzes,
+    solvedQuizzesCount,
+    quizProgressPercent: totalQuizzes > 0 ? (solvedQuizzesCount / totalQuizzes) * 100 : 0,
+    performanceScorePercent,
+    activity: buildLast30DayActivity(solvedQuizRows, watchedVideos),
+  };
+}
+
 function normalizeQuizMetadata(rawValue) {
   if (!rawValue) return [];
   let parsed = rawValue;
@@ -1251,99 +1477,27 @@ app.get('/videos', authMiddleware, async (req, res) => {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
 
-    const allowedMonths = authState.allowedMonths;
-    const catalog = readCatalog();
-    await ensureCatalogSessions(client, catalog);
-    const sessionMap = await loadSessionMap(client);
-    const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client);
-
-    let months = allowedMonths.map((month) => {
-      // Videos
-      const videos = catalog.videos
-        .filter((video) => String(video?.month || '').toUpperCase() === month)
-        .map((video) => ({
-          id:          String(video.id || ''),
-          title:       String(video.title || 'Record'),
-          month,
-          session:     String(video.session || 'S1').toUpperCase(),
-          durationSec: Number.isFinite(video.durationSec) ? Number(video.durationSec) : null,
-        }))
-        .filter((v) => v.id);
-
-      // PDFs
-      const pdfs = catalog.pdfs
-        .filter((pdf) => String(pdf?.month || '').toUpperCase() === month)
-        .map((pdf) => {
-          const relativePath = String(pdf?.storage?.relativePath || '').replaceAll('\\', '/');
-          const downloadUrl  = relativePath
-            ? `/pdf/${relativePath.split('/').map(encodeURIComponent).join('/')}`
-            : '';
-          return {
-            id:          String(pdf.id || ''),
-            title:       String(pdf.title || 'PDF'),
-            month,
-            session:     String(pdf.session || 'S1').toUpperCase(),
-            downloadUrl,
-          };
-        })
-        .filter((p) => p.id && p.downloadUrl);
-
-      const quizSessions = new Map();
-      for (const video of videos) {
-        quizSessions.set(String(video.session || '').toUpperCase(), true);
-      }
-      for (const pdf of pdfs) {
-        quizSessions.set(String(pdf.session || '').toUpperCase(), true);
-      }
-
-      const quizzes = Array.from(quizSessions.keys()).map((sessionCode) => {
-        const sessionRow = sessionMap.get(`${month}:${sessionCode}`);
-        return {
-          month,
-          session: sessionCode,
-          sessionId: sessionRow?.id ? String(sessionRow.id) : '',
-          hasQuiz: Boolean(sessionRow?.id && quizEnabledSessionIds.has(String(sessionRow.id))),
-        };
-      }).filter((quiz) => quiz.hasQuiz && quiz.sessionId);
-
-      return { month, videos, pdfs, quizzes };
-    });
-
-    // Fallback to legacy math_records if no catalog videos exist at all
-    const hasCatalogVideos = months.some((month) => month.videos.length > 0);
-    if (!hasCatalogVideos) {
-      const records = await getRecordsRows(client);
-      months = allowedMonths.map((month) => {
-        const monthKey = monthColumn(month);
-        const videos = records
-          .map((record) => {
-            const url = normalizeRecordUrl(record[monthKey]);
-            if (!url) return null;
-            return {
-              id: `${month}_${record.record_no}`,
-              title: `Record ${record.record_no}`,
-              month,
-              session: 'S1',
-              durationSec: null,
-            };
-          })
-          .filter(Boolean);
-
-        const sessionRow = sessionMap.get(`${month}:S1`);
-        return {
-          month,
-          videos,
-          pdfs: [],
-          quizzes: sessionRow?.id && quizEnabledSessionIds.has(String(sessionRow.id))
-            ? [{ month, session: 'S1', sessionId: String(sessionRow.id), hasQuiz: true }]
-            : [],
-        };
-      });
-    }
-
+    const months = await buildAuthorizedMonthsPayload(client, authState.allowedMonths);
     return res.json({ generatedAt: new Date().toISOString(), months });
   } catch (error) {
     return res.status(500).json({ error: `Failed to query months: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/student/dashboard', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authState = await getStudentFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status || 401).json({ error: authState.error });
+    }
+
+    const dashboard = await buildStudentDashboardPayload(client, authState);
+    return res.json(dashboard);
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to load student dashboard: ${error.message}` });
   } finally {
     client.release();
   }
@@ -1566,6 +1720,71 @@ app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
       // ignore rollback errors
     }
     return res.status(500).json({ error: `Failed to submit quiz: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/videos/:videoId/activity', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authState = await getStudentFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status || 401).json({ error: authState.error });
+    }
+
+    const watchedSeconds = Math.floor(Number(req.body?.watchedSeconds));
+    if (!Number.isFinite(watchedSeconds) || watchedSeconds < 0) {
+      return res.status(400).json({ error: 'watchedSeconds must be a non-negative number' });
+    }
+
+    const monthsPayload = await buildAuthorizedMonthsPayload(client, authState.allowedMonths);
+    let matchedVideo = null;
+    for (const month of monthsPayload) {
+      for (const video of month.videos) {
+        if (String(video.id || '') === req.params.videoId) {
+          matchedVideo = video;
+          break;
+        }
+      }
+      if (matchedVideo) break;
+    }
+
+    if (!matchedVideo) {
+      return res.status(404).json({ error: 'Video not found for this student' });
+    }
+
+    if (watchedSeconds >= 3600) {
+      await client.query(
+        `INSERT INTO student_video_watches (
+          student_id,
+          video_id,
+          month_code,
+          session_code,
+          watched_seconds,
+          qualified_at,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        ON CONFLICT (student_id, video_id) DO UPDATE
+        SET watched_seconds = GREATEST(student_video_watches.watched_seconds, EXCLUDED.watched_seconds),
+            updated_at = NOW()`,
+        [
+          authState.student.id,
+          String(matchedVideo.id || ''),
+          String(matchedVideo.month || ''),
+          String(matchedVideo.session || 'S1'),
+          watchedSeconds,
+        ],
+      );
+    }
+
+    const dashboard = await buildStudentDashboardPayload(client, authState, monthsPayload);
+    return res.json({
+      recorded: watchedSeconds >= 3600,
+      dashboard,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to record video activity: ${error.message}` });
   } finally {
     client.release();
   }

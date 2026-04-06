@@ -106,6 +106,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_quiz_results_student_session_unique
 CREATE INDEX IF NOT EXISTS idx_quiz_results_session_id
   ON quiz_results (session_id, created_at);
 
+-- 5) Qualified student video watches.
+CREATE TABLE IF NOT EXISTS student_video_watches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  student_id BIGINT NOT NULL REFERENCES student_serials(id) ON DELETE CASCADE,
+  video_id TEXT NOT NULL,
+  month_code TEXT NOT NULL,
+  session_code TEXT NOT NULL,
+  watched_seconds INT NOT NULL DEFAULT 0 CHECK (watched_seconds >= 0),
+  qualified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (student_id, video_id)
+);
+
+ALTER TABLE student_video_watches
+  ADD COLUMN IF NOT EXISTS month_code TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE student_video_watches
+  ADD COLUMN IF NOT EXISTS session_code TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE student_video_watches
+  ADD COLUMN IF NOT EXISTS watched_seconds INT NOT NULL DEFAULT 0;
+
+ALTER TABLE student_video_watches
+  ADD COLUMN IF NOT EXISTS qualified_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE student_video_watches
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE INDEX IF NOT EXISTS idx_student_video_watches_student_id
+  ON student_video_watches (student_id, qualified_at DESC);
+
 -- ---------------------------
 -- Sample seed data (edit/delete as you like)
 -- ---------------------------
