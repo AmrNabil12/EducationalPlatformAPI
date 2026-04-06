@@ -341,17 +341,6 @@ async function getSessionById(client, sessionId) {
   return result.rows[0] || null;
 }
 
-async function getQuizQuestions(client, sessionId) {
-  const result = await client.query(
-    `SELECT id, image_url, correct_option_index, options_count, points, created_at
-     FROM quiz_questions
-     WHERE session_id = $1
-     ORDER BY created_at ASC, id ASC`,
-    [sessionId],
-  );
-  return result.rows;
-}
-
 async function getQuizSessionConfig(client, sessionId) {
   const result = await client.query(
     `SELECT id, session_id, drive_folder_id, encrypted_metadata, question_count, created_at, updated_at
@@ -365,9 +354,7 @@ async function getQuizSessionConfig(client, sessionId) {
 
 async function loadQuizEnabledSessionIds(client) {
   const result = await client.query(
-    `SELECT session_id::text AS session_id FROM quiz_sessions
-     UNION
-     SELECT DISTINCT session_id::text AS session_id FROM quiz_questions`,
+    'SELECT session_id::text AS session_id FROM quiz_sessions',
   );
   return new Set(result.rows.map((row) => String(row.session_id || '')));
 }
@@ -484,18 +471,11 @@ async function loadQuizTotalPointsMap(client, sessionIds) {
     if (!sessionId) continue;
 
     const quizSessionConfig = await getQuizSessionConfig(client, sessionId);
-    if (quizSessionConfig) {
-      totals.set(sessionId, buildFolderQuizMetadataDefinition(quizSessionConfig).totalPoints);
+    if (!quizSessionConfig) {
+      totals.set(sessionId, 0);
       continue;
     }
-
-    const result = await client.query(
-      `SELECT COALESCE(SUM(points), 0) AS total_points
-       FROM quiz_questions
-       WHERE session_id = $1`,
-      [sessionId],
-    );
-    totals.set(sessionId, Number(result.rows[0]?.total_points) || 0);
+    totals.set(sessionId, buildFolderQuizMetadataDefinition(quizSessionConfig).totalPoints);
   }
   return totals;
 }
@@ -544,23 +524,32 @@ async function buildStudentDashboardPayload(client, authState, monthsPayload = n
     months.flatMap((month) => month.quizzes.map((quiz) => String(quiz.sessionId || ''))).filter(Boolean),
   ));
 
-  const watchHistoryResult = await client.query(
-    `SELECT COUNT(*)::int AS count
-     FROM student_video_watches
-     WHERE student_id = $1`,
-    [authState.student.id],
-  );
-  const hasVideoWatchHistory = (Number(watchHistoryResult.rows[0]?.count) || 0) > 0;
+  let hasVideoWatchHistory = false;
+  try {
+    const watchHistoryResult = await client.query(
+      `SELECT COUNT(*)::int AS count
+       FROM student_video_watches
+       WHERE student_id = $1`,
+      [authState.student.id],
+    );
+    hasVideoWatchHistory = (Number(watchHistoryResult.rows[0]?.count) || 0) > 0;
+  } catch (error) {
+    if (error?.code !== '42P01') throw error;
+  }
 
   let watchedVideos = [];
   if (videoIds.length > 0) {
-    const result = await client.query(
-      `SELECT video_id, qualified_at AS activity_at
-       FROM student_video_watches
-       WHERE student_id = $1 AND video_id = ANY($2::text[])`,
-      [authState.student.id, videoIds],
-    );
-    watchedVideos = result.rows;
+    try {
+      const result = await client.query(
+        `SELECT video_id, qualified_at AS activity_at
+         FROM student_video_watches
+         WHERE student_id = $1 AND video_id = ANY($2::text[])`,
+        [authState.student.id, videoIds],
+      );
+      watchedVideos = result.rows;
+    } catch (error) {
+      if (error?.code !== '42P01') throw error;
+    }
   }
 
   let solvedQuizRows = [];
@@ -822,15 +811,6 @@ async function buildFolderQuizDefinition(quizSessionConfig) {
   };
 }
 
-function mapQuizQuestionForPlayer(question) {
-  return {
-    id: String(question.id || ''),
-    imageUrl: String(question.image_url || ''),
-    optionsCount: Number(question.options_count) || 0,
-    points: Number(question.points) || 0,
-  };
-}
-
 function mapFolderQuizQuestionForPlayer(question) {
   return {
     id: `folder-question-${question.index + 1}`,
@@ -842,70 +822,22 @@ function mapFolderQuizQuestionForPlayer(question) {
   };
 }
 
-function mapQuizQuestionForReview(question, studentAnswers, index) {
-  const answer = Array.isArray(studentAnswers) ? studentAnswers[index] : null;
-  const normalizedStudentChoice = Number.isInteger(answer) ? answer : null;
-  return {
-    id: String(question.id || ''),
-    imageUrl: String(question.image_url || ''),
-    optionsCount: Number(question.options_count) || 0,
-    points: Number(question.points) || 0,
-    studentChoiceIndex: normalizedStudentChoice,
-    correctOptionIndex: Number(question.correct_option_index),
-    isCorrect: normalizedStudentChoice === Number(question.correct_option_index),
-  };
-}
-
 async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPem = '') {
   const quizSessionConfig = await getQuizSessionConfig(client, sessionRow.id);
-  if (quizSessionConfig) {
-    const definition = buildFolderQuizMetadataDefinition(quizSessionConfig);
-    const result = await client.query(
-      `SELECT id, score, total_questions, student_answers, time_taken_seconds, created_at
-       FROM quiz_results
-       WHERE student_id = $1 AND session_id = $2
-       LIMIT 1`,
-      [studentId, sessionRow.id],
-    );
-
-    const hasQuiz = definition.questionCount > 0;
-    if (result.rowCount === 0) {
-      return {
-        hasQuiz,
-        attempted: false,
-        deliveryMode: 'folder_sync',
-        sessionId: String(sessionRow.id),
-        month: String(sessionRow.month_code || ''),
-        session: String(sessionRow.session_code || ''),
-        totalQuestions: definition.questionCount,
-        totalPoints: definition.totalPoints,
-      };
-    }
-
-    const row = result.rows[0];
-    const studentAnswers = Array.isArray(row.student_answers) ? row.student_answers : [];
+  if (!quizSessionConfig) {
     return {
-      hasQuiz,
-      attempted: true,
+      hasQuiz: false,
+      attempted: false,
       deliveryMode: 'folder_sync',
       sessionId: String(sessionRow.id),
       month: String(sessionRow.month_code || ''),
       session: String(sessionRow.session_code || ''),
-      totalQuestions: definition.questionCount,
-      totalPoints: definition.totalPoints,
-      result: {
-        id: String(row.id),
-        score: Number(row.score) || 0,
-        totalQuestions: Number(row.total_questions) || 0,
-        totalPoints: definition.totalPoints,
-        studentAnswers,
-        timeTakenSeconds: Number(row.time_taken_seconds) || 0,
-        createdAt: row.created_at,
-      },
+      totalQuestions: 0,
+      totalPoints: 0,
     };
   }
 
-  const questions = await getQuizQuestions(client, sessionRow.id);
+  const definition = buildFolderQuizMetadataDefinition(quizSessionConfig);
   const result = await client.query(
     `SELECT id, score, total_questions, student_answers, time_taken_seconds, created_at
      FROM quiz_results
@@ -914,20 +846,18 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
     [studentId, sessionRow.id],
   );
 
-  const questionCount = questions.length;
-  const totalPoints = questions.reduce((sum, question) => sum + (Number(question.points) || 0), 0);
-  const hasQuiz = questionCount > 0;
+  const hasQuiz = definition.questionCount > 0;
 
   if (result.rowCount === 0) {
     return {
       hasQuiz,
       attempted: false,
+      deliveryMode: 'folder_sync',
       sessionId: String(sessionRow.id),
       month: String(sessionRow.month_code || ''),
       session: String(sessionRow.session_code || ''),
-      totalQuestions: questionCount,
-      totalPoints,
-      questions: questions.map(mapQuizQuestionForPlayer),
+      totalQuestions: definition.questionCount,
+      totalPoints: definition.totalPoints,
     };
   }
 
@@ -936,83 +866,81 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
   return {
     hasQuiz,
     attempted: true,
+    deliveryMode: 'folder_sync',
     sessionId: String(sessionRow.id),
     month: String(sessionRow.month_code || ''),
     session: String(sessionRow.session_code || ''),
+    totalQuestions: definition.questionCount,
+    totalPoints: definition.totalPoints,
     result: {
       id: String(row.id),
       score: Number(row.score) || 0,
       totalQuestions: Number(row.total_questions) || 0,
-      totalPoints,
+      totalPoints: definition.totalPoints,
       studentAnswers,
       timeTakenSeconds: Number(row.time_taken_seconds) || 0,
       createdAt: row.created_at,
     },
-    questions: questions.map((question, index) => mapQuizQuestionForReview(question, studentAnswers, index)),
   };
 }
 
 async function buildQuizContentPayload(client, sessionRow, publicKeyPem = '') {
   const quizSessionConfig = await getQuizSessionConfig(client, sessionRow.id);
-  if (quizSessionConfig) {
-    const definition = await buildFolderQuizDefinition(quizSessionConfig);
-    if (!publicKeyPem) {
-      throw new Error('Missing student public key for encrypted quiz metadata');
-    }
-
-    const encryptedPackage = encryptJsonForStudent(publicKeyPem, {
-      version: 1,
-      sessionId: String(sessionRow.id),
-      month: String(sessionRow.month_code || ''),
-      session: String(sessionRow.session_code || ''),
-      questions: definition.questions.map((question) => ({
-        q: question.questionNumber,
-        options: question.options,
-        correct: question.correctOptionIndex,
-        points: question.points,
-      })),
-    });
-
+  if (!quizSessionConfig) {
     return {
-      hasQuiz: definition.questionCount > 0,
+      hasQuiz: false,
       attempted: false,
       deliveryMode: 'folder_sync',
       sessionId: String(sessionRow.id),
       month: String(sessionRow.month_code || ''),
       session: String(sessionRow.session_code || ''),
-      totalQuestions: definition.questionCount,
-      totalPoints: definition.totalPoints,
-      questions: definition.questions.map(mapFolderQuizQuestionForPlayer),
-      sync: {
-        driveFolderId: String(quizSessionConfig.drive_folder_id || ''),
-        appsScriptUrl: String(QUIZ_APP_SCRIPT_URL || ''),
-        imageAssets: definition.questions.map((question) => ({
-          index: question.index,
-          fileName: String(question.fileName || ''),
-          imageUrl: String(question.imageUrl || ''),
-          imageDownloadUrl: createGoogleDriveDownloadUrl(question.fileId),
-        })),
-        encryptedMetadataB64: encryptedPackage.encryptedPackageB64,
-        encryptedMetadataKeyB64: encryptedPackage.encryptedPackageKeyB64,
-        metadataNonceB64: encryptedPackage.packageNonceB64,
-      },
+      totalQuestions: 0,
+      totalPoints: 0,
+      questions: [],
     };
   }
 
-  const questions = await getQuizQuestions(client, sessionRow.id);
-  const questionCount = questions.length;
-  const totalPoints = questions.reduce((sum, question) => sum + (Number(question.points) || 0), 0);
+  const definition = await buildFolderQuizDefinition(quizSessionConfig);
+  if (!publicKeyPem) {
+    throw new Error('Missing student public key for encrypted quiz metadata');
+  }
 
-  return {
-    hasQuiz: questionCount > 0,
-    attempted: false,
-    deliveryMode: 'legacy',
+  const encryptedPackage = encryptJsonForStudent(publicKeyPem, {
+    version: 1,
     sessionId: String(sessionRow.id),
     month: String(sessionRow.month_code || ''),
     session: String(sessionRow.session_code || ''),
-    totalQuestions: questionCount,
-    totalPoints,
-    questions: questions.map(mapQuizQuestionForPlayer),
+    questions: definition.questions.map((question) => ({
+      q: question.questionNumber,
+      options: question.options,
+      correct: question.correctOptionIndex,
+      points: question.points,
+    })),
+  });
+
+  return {
+    hasQuiz: definition.questionCount > 0,
+    attempted: false,
+    deliveryMode: 'folder_sync',
+    sessionId: String(sessionRow.id),
+    month: String(sessionRow.month_code || ''),
+    session: String(sessionRow.session_code || ''),
+    totalQuestions: definition.questionCount,
+    totalPoints: definition.totalPoints,
+    questions: definition.questions.map(mapFolderQuizQuestionForPlayer),
+    sync: {
+      driveFolderId: String(quizSessionConfig.drive_folder_id || ''),
+      appsScriptUrl: String(QUIZ_APP_SCRIPT_URL || ''),
+      imageAssets: definition.questions.map((question) => ({
+        index: question.index,
+        fileName: String(question.fileName || ''),
+        imageUrl: String(question.imageUrl || ''),
+        imageDownloadUrl: createGoogleDriveDownloadUrl(question.fileId),
+      })),
+      encryptedMetadataB64: encryptedPackage.encryptedPackageB64,
+      encryptedMetadataKeyB64: encryptedPackage.encryptedPackageKeyB64,
+      metadataNonceB64: encryptedPackage.packageNonceB64,
+    },
   };
 }
 
@@ -1627,61 +1555,35 @@ app.post('/quiz/submit/:sessionId', authMiddleware, async (req, res) => {
     let normalizedAnswers = [];
     let score = 0;
 
-    if (quizSessionConfig) {
-      const definition = buildFolderQuizMetadataDefinition(quizSessionConfig);
-      totalQuestions = definition.questions.length;
-      if (totalQuestions === 0) {
-        return res.status(404).json({ error: 'This session does not have a quiz yet' });
-      }
-      if (answers.length !== totalQuestions) {
-        return res.status(400).json({ error: `answers length must equal ${totalQuestions}` });
-      }
+    if (!quizSessionConfig) {
+      return res.status(404).json({ error: 'This session does not have a quiz yet' });
+    }
 
-      normalizedAnswers = answers.map((value, index) => {
-        if (value === null) return null;
-        if (!Number.isInteger(value)) {
-          throw new Error(`Answer at index ${index} must be an integer or null`);
-        }
-        const optionIndex = Number(value);
-        const optionsCount = definition.questions[index].options.length;
-        if (optionIndex < 0 || optionIndex >= optionsCount) {
-          throw new Error(`Answer at index ${index} is out of range`);
-        }
-        return optionIndex;
-      });
+    const definition = buildFolderQuizMetadataDefinition(quizSessionConfig);
+    totalQuestions = definition.questions.length;
+    if (totalQuestions === 0) {
+      return res.status(404).json({ error: 'This session does not have a quiz yet' });
+    }
+    if (answers.length !== totalQuestions) {
+      return res.status(400).json({ error: `answers length must equal ${totalQuestions}` });
+    }
 
-      for (let i = 0; i < definition.questions.length; i += 1) {
-        if (normalizedAnswers[i] === Number(definition.questions[i].correctOptionIndex)) {
-          score += Number(definition.questions[i].points) || 0;
-        }
+    normalizedAnswers = answers.map((value, index) => {
+      if (value === null) return null;
+      if (!Number.isInteger(value)) {
+        throw new Error(`Answer at index ${index} must be an integer or null`);
       }
-    } else {
-      const questions = await getQuizQuestions(client, sessionRow.id);
-      totalQuestions = questions.length;
-      if (totalQuestions === 0) {
-        return res.status(404).json({ error: 'This session does not have a quiz yet' });
+      const optionIndex = Number(value);
+      const optionsCount = definition.questions[index].options.length;
+      if (optionIndex < 0 || optionIndex >= optionsCount) {
+        throw new Error(`Answer at index ${index} is out of range`);
       }
-      if (answers.length !== totalQuestions) {
-        return res.status(400).json({ error: `answers length must equal ${totalQuestions}` });
-      }
+      return optionIndex;
+    });
 
-      normalizedAnswers = answers.map((value, index) => {
-        if (value === null) return null;
-        if (!Number.isInteger(value)) {
-          throw new Error(`Answer at index ${index} must be an integer or null`);
-        }
-        const optionIndex = Number(value);
-        const optionsCount = Number(questions[index].options_count) || 0;
-        if (optionIndex < 0 || optionIndex >= optionsCount) {
-          throw new Error(`Answer at index ${index} is out of range`);
-        }
-        return optionIndex;
-      });
-
-      for (let i = 0; i < questions.length; i += 1) {
-        if (normalizedAnswers[i] === Number(questions[i].correct_option_index)) {
-          score += Number(questions[i].points) || 0;
-        }
+    for (let i = 0; i < definition.questions.length; i += 1) {
+      if (normalizedAnswers[i] === Number(definition.questions[i].correctOptionIndex)) {
+        score += Number(definition.questions[i].points) || 0;
       }
     }
 
@@ -1783,27 +1685,31 @@ app.post('/videos/:videoId/activity', authMiddleware, async (req, res) => {
     }
 
     if (watchedSeconds >= 3600) {
-      await client.query(
-        `INSERT INTO student_video_watches (
-          student_id,
-          video_id,
-          month_code,
-          session_code,
-          watched_seconds,
-          qualified_at,
-          updated_at
-        ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-        ON CONFLICT (student_id, video_id) DO UPDATE
-        SET watched_seconds = GREATEST(student_video_watches.watched_seconds, EXCLUDED.watched_seconds),
-            updated_at = NOW()`,
-        [
-          authState.student.id,
-          String(matchedVideo.id || ''),
-          String(matchedVideo.month || ''),
-          String(matchedVideo.session || 'S1'),
-          watchedSeconds,
-        ],
-      );
+      try {
+        await client.query(
+          `INSERT INTO student_video_watches (
+            student_id,
+            video_id,
+            month_code,
+            session_code,
+            watched_seconds,
+            qualified_at,
+            updated_at
+          ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+          ON CONFLICT (student_id, video_id) DO UPDATE
+          SET watched_seconds = GREATEST(student_video_watches.watched_seconds, EXCLUDED.watched_seconds),
+              updated_at = NOW()`,
+          [
+            authState.student.id,
+            String(matchedVideo.id || ''),
+            String(matchedVideo.month || ''),
+            String(matchedVideo.session || 'S1'),
+            watchedSeconds,
+          ],
+        );
+      } catch (error) {
+        if (error?.code !== '42P01') throw error;
+      }
     }
 
     const dashboard = await buildStudentDashboardPayload(client, authState, monthsPayload);

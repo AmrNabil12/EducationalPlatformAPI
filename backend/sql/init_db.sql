@@ -59,21 +59,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_month_session
   ON sessions (month_code, session_code);
 
--- 3) Quiz questions.
-CREATE TABLE IF NOT EXISTS quiz_questions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  image_url TEXT NOT NULL,
-  correct_option_index INT NOT NULL CHECK (correct_option_index >= 0),
-  options_count INT NOT NULL CHECK (options_count BETWEEN 2 AND 6),
-  points INT NOT NULL DEFAULT 1 CHECK (points >= 0),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_quiz_questions_session_id
-  ON quiz_questions (session_id, created_at, id);
-
--- Preferred folder-based quiz package table.
+-- 3) Preferred folder-based quiz package table.
 CREATE TABLE IF NOT EXISTS quiz_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
