@@ -1482,7 +1482,6 @@ app.put('/student/profile', authMiddleware, async (req, res) => {
   const phoneNumber = normalizePhoneNumber(req.body.phoneNumber);
   const parentPhoneNumber = normalizePhoneNumber(req.body.parentPhoneNumber);
   const email = normalizeGmailAddress(req.body.email);
-  const avatarDataUrl = normalizeAvatarDataUrl(req.body.avatarDataUrl);
 
   if (!fullName) {
     return res.status(400).json({ error: 'fullName is required' });
@@ -1499,9 +1498,6 @@ app.put('/student/profile', authMiddleware, async (req, res) => {
   if (!email) {
     return res.status(400).json({ error: 'email must be a valid gmail address' });
   }
-  if (avatarDataUrl === null) {
-    return res.status(400).json({ error: 'avatarDataUrl must be a valid base64 image data URL' });
-  }
 
   const client = await pool.connect();
   try {
@@ -1517,16 +1513,14 @@ app.put('/student/profile', authMiddleware, async (req, res) => {
            phone_number = $3,
            parent_phone_number = $4,
            email = $5,
-           avatar_data_url = $6,
            updated_at = NOW()
-       WHERE id = $7`,
+       WHERE id = $6`,
       [
         fullName,
         gender,
         phoneNumber,
         parentPhoneNumber,
         email,
-        avatarDataUrl || '',
         authState.student.id,
       ],
     );
@@ -1537,9 +1531,6 @@ app.put('/student/profile', authMiddleware, async (req, res) => {
       profile: mapStudentProfile(refreshed || authState.student),
     });
   } catch (error) {
-    if (error?.code === '42703') {
-      return res.status(500).json({ error: 'Profile image migration is not applied on the database yet' });
-    }
     return res.status(500).json({ error: `Failed to update student profile: ${error.message}` });
   } finally {
     client.release();
