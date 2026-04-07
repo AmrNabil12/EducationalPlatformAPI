@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS student_serials (
   phone_number TEXT NULL,
   parent_phone_number TEXT NULL,
   email TEXT NULL,
+  avatar_data_url TEXT NULL,
   device_id TEXT NULL,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   -- CSV format expected by backend: e.g. "M1,M2,M4,M6"
@@ -36,6 +37,9 @@ ALTER TABLE student_serials
 
 ALTER TABLE student_serials
   ADD COLUMN IF NOT EXISTS email TEXT NULL;
+
+ALTER TABLE student_serials
+  ADD COLUMN IF NOT EXISTS avatar_data_url TEXT NULL;
 
 -- 2) Create the UNIQUE index AFTER the table exists
 -- This ensures one device cannot hijack multiple serials

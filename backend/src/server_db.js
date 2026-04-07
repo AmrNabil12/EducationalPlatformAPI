@@ -126,6 +126,15 @@ function normalizeGmailAddress(value) {
   return /^[a-z0-9._%+-]+@gmail\.com$/.test(normalized) ? normalized : '';
 }
 
+function normalizeAvatarDataUrl(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  if (!/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+$/i.test(normalized)) {
+    return null;
+  }
+  return normalized.length <= 1_500_000 ? normalized : null;
+}
+
 function normalizeAllowedMonths(value) {
   let tokens = [];
 
@@ -226,16 +235,39 @@ function authMiddleware(req, res, next) {
 }
 
 async function getStudentBySerial(client, serial) {
-  const result = await client.query(
-    `SELECT id, serial_no, full_name, gender, phone_number, parent_phone_number, email, device_id, active, allowed_months, public_key_pem
-     FROM "${studentTable}"
-     WHERE UPPER(serial_no) = UPPER($1)
-     LIMIT 1`,
-    [serial],
-  );
+  let result;
+  try {
+    result = await client.query(
+      `SELECT id, serial_no, full_name, gender, phone_number, parent_phone_number, email, avatar_data_url, device_id, active, allowed_months, public_key_pem
+       FROM "${studentTable}"
+       WHERE UPPER(serial_no) = UPPER($1)
+       LIMIT 1`,
+      [serial],
+    );
+  } catch (error) {
+    if (error?.code !== '42703') throw error;
+    result = await client.query(
+      `SELECT id, serial_no, full_name, gender, phone_number, parent_phone_number, email, device_id, active, allowed_months, public_key_pem
+       FROM "${studentTable}"
+       WHERE UPPER(serial_no) = UPPER($1)
+       LIMIT 1`,
+      [serial],
+    );
+  }
 
   if (result.rowCount === 0) return null;
   return result.rows[0];
+}
+
+function mapStudentProfile(row) {
+  return {
+    fullName: String(row?.full_name || '').trim(),
+    email: String(row?.email || '').trim(),
+    phoneNumber: String(row?.phone_number || '').trim(),
+    parentPhoneNumber: String(row?.parent_phone_number || '').trim(),
+    gender: String(row?.gender || '').trim(),
+    avatarDataUrl: String(row?.avatar_data_url || '').trim(),
+  };
 }
 
 async function getRecordsRows(client) {
@@ -1423,6 +1455,92 @@ app.post('/auth/login', async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: `Login query failed: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/student/profile', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authState = await getStudentFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status).json({ error: authState.error });
+    }
+
+    return res.json(mapStudentProfile(authState.student));
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to load student profile: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.put('/student/profile', authMiddleware, async (req, res) => {
+  const fullName = normalizeName(req.body.fullName);
+  const gender = normalizeGender(req.body.gender);
+  const phoneNumber = normalizePhoneNumber(req.body.phoneNumber);
+  const parentPhoneNumber = normalizePhoneNumber(req.body.parentPhoneNumber);
+  const email = normalizeGmailAddress(req.body.email);
+  const avatarDataUrl = normalizeAvatarDataUrl(req.body.avatarDataUrl);
+
+  if (!fullName) {
+    return res.status(400).json({ error: 'fullName is required' });
+  }
+  if (!gender) {
+    return res.status(400).json({ error: 'gender must be either male or female' });
+  }
+  if (!phoneNumber) {
+    return res.status(400).json({ error: 'phoneNumber must match 01[0|1|2|5]XXXXXXXX' });
+  }
+  if (!parentPhoneNumber) {
+    return res.status(400).json({ error: 'parentPhoneNumber must match 01[0|1|2|5]XXXXXXXX' });
+  }
+  if (!email) {
+    return res.status(400).json({ error: 'email must be a valid gmail address' });
+  }
+  if (avatarDataUrl === null) {
+    return res.status(400).json({ error: 'avatarDataUrl must be a valid base64 image data URL' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const authState = await getStudentFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status).json({ error: authState.error });
+    }
+
+    await client.query(
+      `UPDATE "${studentTable}"
+       SET full_name = $1,
+           gender = $2,
+           phone_number = $3,
+           parent_phone_number = $4,
+           email = $5,
+           avatar_data_url = $6,
+           updated_at = NOW()
+       WHERE id = $7`,
+      [
+        fullName,
+        gender,
+        phoneNumber,
+        parentPhoneNumber,
+        email,
+        avatarDataUrl || '',
+        authState.student.id,
+      ],
+    );
+
+    const refreshed = await getStudentBySerial(client, authState.student.serial_no);
+    return res.json({
+      message: 'Profile updated successfully',
+      profile: mapStudentProfile(refreshed || authState.student),
+    });
+  } catch (error) {
+    if (error?.code === '42703') {
+      return res.status(500).json({ error: 'Profile image migration is not applied on the database yet' });
+    }
+    return res.status(500).json({ error: `Failed to update student profile: ${error.message}` });
   } finally {
     client.release();
   }
