@@ -2042,9 +2042,13 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
 
     const existingEntry = existingIndex >= 0 ? catalog.videos[existingIndex] : null;
     const videoId = String(existingEntry?.id || '').trim() || crypto.randomUUID();
+    const existingRelativePath = normalizeRelativeStoragePath(
+      existingEntry?.storage?.relativePath,
+    );
     const relativePath = normalizeRelativeStoragePath(
-      existingEntry?.storage?.relativePath
-      || `external/${month}/${session}/${sanitizeStorageName(title)}-${videoId}.mp4`,
+      /^encrypted\//i.test(existingRelativePath)
+        ? existingRelativePath
+        : `encrypted/${month}/${session}/${sanitizeStorageName(title)}`,
     );
 
     const videoRecord = {
@@ -2092,7 +2096,6 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
 app.post('/admin/google-drive-index', authMiddleware, async (req, res) => {
   const relativePath = normalizeRelativeStoragePath(req.body.relativePath);
   const rawGoogleDriveUrl = String(req.body.googleDriveUrl || '').trim();
-  const googleDriveUrl = normalizeGoogleDriveValue(rawGoogleDriveUrl);
 
   if (!relativePath) {
     return res.status(400).json({ error: 'relativePath is required' });
@@ -2109,14 +2112,14 @@ app.post('/admin/google-drive-index', authMiddleware, async (req, res) => {
     }
 
     const index = loadGoogleDriveIndex();
-    index[relativePath] = googleDriveUrl || rawGoogleDriveUrl;
+    index[relativePath] = rawGoogleDriveUrl;
     saveGoogleDriveIndex(index);
 
     return res.status(200).json({
       message: 'Remote Google Drive index updated successfully',
       entry: {
         relativePath,
-        googleDriveUrl: index[relativePath],
+        googleDriveUrl: rawGoogleDriveUrl,
         googleDriveIndexUpdated: true,
         googleDriveIndexMessage: 'Remote Google Drive index updated successfully',
       },
