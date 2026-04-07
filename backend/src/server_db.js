@@ -133,6 +133,16 @@ function normalizeGmailAddress(value) {
   return /^[a-z0-9._%+-]+@gmail\.com$/.test(normalized) ? normalized : '';
 }
 
+function decodePublicKeyPemHeader(req) {
+  const encoded = String(req.get('x-student-public-key-b64') || '').trim();
+  if (!encoded) return '';
+  try {
+    return Buffer.from(encoded, 'base64').toString('utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 function normalizeAvatarDataUrl(value) {
   const normalized = String(value || '').trim();
   if (!normalized) return '';
@@ -2046,10 +2056,13 @@ app.get('/quiz/content/:sessionId', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: `You are not subscribed to ${month || 'this month'}` });
     }
 
+    const requestPublicKeyPem = decodePublicKeyPemHeader(req);
+    const effectivePublicKeyPem = requestPublicKeyPem || String(authState.student.public_key_pem || '').trim();
+
     const payload = await buildQuizContentPayload(
       client,
       sessionRow,
-      String(authState.student.public_key_pem || '').trim(),
+      effectivePublicKeyPem,
     );
     return res.json(payload);
   } catch (error) {
