@@ -2007,7 +2007,6 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
   const title = normalizeName(req.body.title);
   const month = normalizeMonthCode(req.body.month);
   const session = normalizeSessionCode(req.body.session);
-  const googleDriveUrl = String(req.body.googleDriveUrl || '').trim();
 
   if (!title) {
     return res.status(400).json({ error: 'title is required' });
@@ -2017,9 +2016,6 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
   }
   if (!session) {
     return res.status(400).json({ error: 'session must be in the form S1, S2, ...' });
-  }
-  if (!googleDriveUrl) {
-    return res.status(400).json({ error: 'googleDriveUrl is required' });
   }
 
   const client = await pool.connect();
@@ -2038,13 +2034,21 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
     );
 
     const catalog = readCatalog();
-    const index = loadGoogleDriveIndex();
-    const videoId = crypto.randomUUID();
+    const existingIndex = catalog.videos.findIndex((entry) => (
+      normalizeMonthCode(entry?.month) === month
+      && normalizeSessionCode(entry?.session) === session
+      && String(entry?.storage?.mode || '').trim().toLowerCase() === 'external'
+    ));
+
+    const existingEntry = existingIndex >= 0 ? catalog.videos[existingIndex] : null;
+    const videoId = String(existingEntry?.id || '').trim() || crypto.randomUUID();
     const relativePath = normalizeRelativeStoragePath(
-      `external/${month}/${session}/${sanitizeStorageName(title)}-${videoId}.mp4`,
+      existingEntry?.storage?.relativePath
+      || `external/${month}/${session}/${sanitizeStorageName(title)}-${videoId}.mp4`,
     );
 
-    catalog.videos.push({
+    const videoRecord = {
+      ...(existingEntry && typeof existingEntry === 'object' ? existingEntry : {}),
       id: videoId,
       title,
       month,
@@ -2054,28 +2058,71 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
         mode: 'external',
         relativePath,
       },
-      createdAt: new Date().toISOString(),
-    });
-    index[relativePath] = googleDriveUrl;
+      createdAt: String(existingEntry?.createdAt || '').trim() || new Date().toISOString(),
+    };
 
+    if (existingIndex >= 0) {
+      catalog.videos[existingIndex] = videoRecord;
+    } else {
+      catalog.videos.push(videoRecord);
+    }
     writeCatalog(catalog);
-    saveGoogleDriveIndex(index);
 
-    return res.status(201).json({
-      message: 'Video record added successfully',
+    return res.status(existingIndex >= 0 ? 200 : 201).json({
+      message: 'Video record added to remote catalog successfully',
       video: {
         id: videoId,
         title,
         month,
         session,
         relativePath,
-        googleDriveUrl,
         catalogUpdated: true,
-        googleDriveIndexUpdated: true,
+        catalogMessage: 'Remote catalog updated successfully',
+        googleDriveIndexUpdated: false,
+        googleDriveIndexMessage: 'Pending Google Drive mapping',
       },
     });
   } catch (error) {
     return res.status(500).json({ error: `Failed to add video record: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/google-drive-index', authMiddleware, async (req, res) => {
+  const relativePath = normalizeRelativeStoragePath(req.body.relativePath);
+  const rawGoogleDriveUrl = String(req.body.googleDriveUrl || '').trim();
+  const googleDriveUrl = normalizeGoogleDriveValue(rawGoogleDriveUrl);
+
+  if (!relativePath) {
+    return res.status(400).json({ error: 'relativePath is required' });
+  }
+  if (!rawGoogleDriveUrl) {
+    return res.status(400).json({ error: 'googleDriveUrl is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const index = loadGoogleDriveIndex();
+    index[relativePath] = googleDriveUrl || rawGoogleDriveUrl;
+    saveGoogleDriveIndex(index);
+
+    return res.status(200).json({
+      message: 'Remote Google Drive index updated successfully',
+      entry: {
+        relativePath,
+        googleDriveUrl: index[relativePath],
+        googleDriveIndexUpdated: true,
+        googleDriveIndexMessage: 'Remote Google Drive index updated successfully',
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to update Google Drive index: ${error.message}` });
   } finally {
     client.release();
   }
