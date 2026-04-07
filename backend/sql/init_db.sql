@@ -50,7 +50,29 @@ WHERE device_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_student_serials_serial_upper
   ON student_serials ((UPPER(serial_no)));
 
--- 2) Session registry used by quizzes.
+-- 2) Admin serials table.
+CREATE TABLE IF NOT EXISTS admin_serials (
+  id BIGSERIAL PRIMARY KEY,
+  serial_no TEXT NOT NULL UNIQUE,
+  device_id TEXT NULL,
+  public_key_pem TEXT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  bound_at TIMESTAMPTZ NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE admin_serials
+  ADD COLUMN IF NOT EXISTS public_key_pem TEXT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_admin_device_binding
+ON admin_serials (device_id)
+WHERE device_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_admin_serials_serial_upper
+  ON admin_serials ((UPPER(serial_no)));
+
+-- 3) Session registry used by quizzes.
 CREATE TABLE IF NOT EXISTS sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   month_code TEXT NOT NULL,
@@ -63,7 +85,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_month_session
   ON sessions (month_code, session_code);
 
--- 3) Preferred folder-based quiz package table.
+-- 4) Preferred folder-based quiz package table.
 CREATE TABLE IF NOT EXISTS quiz_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
@@ -77,7 +99,7 @@ CREATE TABLE IF NOT EXISTS quiz_sessions (
 CREATE INDEX IF NOT EXISTS idx_quiz_sessions_session_id
   ON quiz_sessions (session_id);
 
--- 4) Quiz results.
+-- 5) Quiz results.
 CREATE TABLE IF NOT EXISTS quiz_results (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   student_id BIGINT NOT NULL REFERENCES student_serials(id) ON DELETE CASCADE,
@@ -96,7 +118,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_quiz_results_student_session_unique
 CREATE INDEX IF NOT EXISTS idx_quiz_results_session_id
   ON quiz_results (session_id, created_at);
 
--- 5) Qualified student video watches.
+-- 6) Qualified student video watches.
 CREATE TABLE IF NOT EXISTS student_video_watches (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   student_id BIGINT NOT NULL REFERENCES student_serials(id) ON DELETE CASCADE,
@@ -156,6 +178,11 @@ VALUES
   ('EDU-9GRB-FJUL-ZUGW', NULL, TRUE, 'M1'),
   ('EDU-CJ2G-WYAZ-9JN5', NULL, TRUE, 'M1'),
   ('EDU-BLRG-Z5LJ-TJ5G', NULL, TRUE, 'M1')
+ON CONFLICT (serial_no) DO NOTHING;
+
+INSERT INTO admin_serials (serial_no, device_id, active)
+VALUES
+  ('ADMN-CTRL-PNEL-0001', NULL, TRUE)
 ON CONFLICT (serial_no) DO NOTHING;
 
 COMMIT;

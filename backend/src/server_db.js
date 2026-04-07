@@ -71,6 +71,7 @@ const GOOGLE_DRIVE_ACCESS_TOKEN = String(process.env.GOOGLE_DRIVE_ACCESS_TOKEN |
 const QUIZ_APP_SCRIPT_URL = String(process.env.QUIZ_APP_SCRIPT_URL || '').trim();
 
 const STUDENT_SERIALS_TABLE = process.env.STUDENT_SERIALS_TABLE || 'student_serials';
+const ADMIN_SERIALS_TABLE = process.env.ADMIN_SERIALS_TABLE || 'admin_serials';
 const MATH_RECORDS_TABLE = process.env.MATH_RECORDS_TABLE || 'math_records';
 
 let googleDriveIndexCache = {
@@ -94,6 +95,7 @@ function sanitizeSqlIdentifier(value) {
 }
 
 const studentTable = sanitizeSqlIdentifier(STUDENT_SERIALS_TABLE);
+const adminTable = sanitizeSqlIdentifier(ADMIN_SERIALS_TABLE);
 const recordsTable = sanitizeSqlIdentifier(MATH_RECORDS_TABLE);
 
 const pool = new Pool({
@@ -105,6 +107,11 @@ const MONTHS = Array.from({ length: 12 }, (_, i) => `M${i + 1}`);
 
 function normalizeSerial(serial) {
   return String(serial || '').trim().toUpperCase();
+}
+
+function normalizeManagedSerial(serial) {
+  const normalized = normalizeSerial(serial);
+  return /^[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}$/.test(normalized) ? normalized : '';
 }
 
 function normalizeName(value) {
@@ -184,6 +191,19 @@ function readCatalog() {
   }
 }
 
+function writeCatalog(catalog) {
+  fs.mkdirSync(path.dirname(catalogPath), { recursive: true });
+  fs.writeFileSync(
+    catalogPath,
+    `${JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      videos: Array.isArray(catalog?.videos) ? catalog.videos : [],
+      pdfs: Array.isArray(catalog?.pdfs) ? catalog.pdfs : [],
+    }, null, 2)}\n`,
+    'utf8',
+  );
+}
+
 function buildChunkManifest(video) {
   const chunks = Array.isArray(video?.storage?.chunks) ? video.storage.chunks : [];
   return chunks.map((chunk, index) => {
@@ -259,6 +279,31 @@ async function getStudentBySerial(client, serial) {
   return result.rows[0];
 }
 
+async function getAdminBySerial(client, serial) {
+  let result;
+  try {
+    result = await client.query(
+      `SELECT id, serial_no, device_id, public_key_pem, active, created_at, updated_at
+       FROM "${adminTable}"
+       WHERE UPPER(serial_no) = UPPER($1)
+       LIMIT 1`,
+      [serial],
+    );
+  } catch (error) {
+    if (error?.code !== '42703') throw error;
+    result = await client.query(
+      `SELECT id, serial_no, device_id, active, created_at, updated_at
+       FROM "${adminTable}"
+       WHERE UPPER(serial_no) = UPPER($1)
+       LIMIT 1`,
+      [serial],
+    );
+  }
+
+  if (result.rowCount === 0) return null;
+  return result.rows[0];
+}
+
 function mapStudentProfile(row) {
   return {
     fullName: String(row?.full_name || '').trim(),
@@ -267,6 +312,17 @@ function mapStudentProfile(row) {
     parentPhoneNumber: String(row?.parent_phone_number || '').trim(),
     gender: String(row?.gender || '').trim(),
     avatarDataUrl: String(row?.avatar_data_url || '').trim(),
+  };
+}
+
+function mapAdminSerialRow(row) {
+  return {
+    serial: String(row?.serial_no || '').trim().toUpperCase(),
+    fullName: String(row?.full_name || '').trim(),
+    email: String(row?.email || '').trim(),
+    phoneNumber: String(row?.phone_number || '').trim(),
+    active: row?.active !== false,
+    createdAt: row?.created_at || null,
   };
 }
 
@@ -873,6 +929,20 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
   }
 
   const definition = buildFolderQuizMetadataDefinition(quizSessionConfig);
+  const hasQuiz = definition.questionCount > 0;
+  if (!studentId) {
+    return {
+      hasQuiz,
+      attempted: false,
+      deliveryMode: 'folder_sync',
+      sessionId: String(sessionRow.id),
+      month: String(sessionRow.month_code || ''),
+      session: String(sessionRow.session_code || ''),
+      totalQuestions: definition.questionCount,
+      totalPoints: definition.totalPoints,
+    };
+  }
+
   const result = await client.query(
     `SELECT id, score, total_questions, student_answers, time_taken_seconds, created_at
      FROM quiz_results
@@ -880,8 +950,6 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
      LIMIT 1`,
     [studentId, sessionRow.id],
   );
-
-  const hasQuiz = definition.questionCount > 0;
 
   if (result.rowCount === 0) {
     return {
@@ -1195,6 +1263,21 @@ function loadGoogleDriveIndex() {
   }
 }
 
+function saveGoogleDriveIndex(index) {
+  fs.mkdirSync(path.dirname(GOOGLE_DRIVE_INDEX_PATH), { recursive: true });
+  fs.writeFileSync(
+    GOOGLE_DRIVE_INDEX_PATH,
+    `${JSON.stringify(index && typeof index === 'object' ? index : {}, null, 2)}\n`,
+    'utf8',
+  );
+
+  googleDriveIndexCache = {
+    mtimeMs: -1,
+    value: index && typeof index === 'object' ? index : {},
+  };
+  googleDrivePathUrlCache.clear();
+}
+
 function normalizeRelativeStoragePath(value) {
   return String(value || '').replaceAll('\\', '/').replace(/^\/+/, '');
 }
@@ -1290,7 +1373,21 @@ function findCatalogStorageMatch(catalogVideos, relativePath) {
   return null;
 }
 
+function sanitizeStorageName(value) {
+  const normalized = String(value || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/\.+$/g, '')
+    .trim();
+  return normalized || 'video';
+}
+
 async function getStudentFromToken(client, reqUser) {
+  if (String(reqUser?.role || '').trim().toLowerCase() === 'admin') {
+    return { error: 'Invalid student session', status: 403 };
+  }
+
   const serial = normalizeSerial(reqUser.serial);
   const deviceId = String(reqUser.deviceId || '').trim();
 
@@ -1311,6 +1408,61 @@ async function getStudentFromToken(client, reqUser) {
   return {
     student,
     allowedMonths: normalizeAllowedMonths(student.allowed_months),
+  };
+}
+
+async function getAdminFromToken(client, reqUser) {
+  const role = String(reqUser?.role || '').trim().toLowerCase();
+  const serial = normalizeSerial(reqUser?.serial);
+  const deviceId = String(reqUser?.deviceId || '').trim();
+  if (role !== 'admin' || !serial || !deviceId) {
+    return { error: 'Invalid admin session', status: 403 };
+  }
+
+  const admin = await getAdminBySerial(client, serial);
+  if (!admin || admin.active === false) {
+    return { error: 'Invalid admin session', status: 401 };
+  }
+
+  const boundDeviceId = String(admin.device_id || '').trim();
+  if (!boundDeviceId || boundDeviceId !== deviceId) {
+    return { error: 'Session/device mismatch', status: 403 };
+  }
+
+  return {
+    admin,
+  };
+}
+
+async function getContentAccessFromToken(client, reqUser) {
+  const role = String(reqUser?.role || '').trim().toLowerCase();
+  if (role === 'admin') {
+    const adminState = await getAdminFromToken(client, reqUser);
+    if (adminState.error) {
+      return adminState;
+    }
+
+    return {
+      role: 'admin',
+      admin: adminState.admin,
+      student: {
+        id: null,
+        public_key_pem: String(adminState.admin.public_key_pem || '').trim(),
+      },
+      allowedMonths: MONTHS,
+      readOnly: true,
+    };
+  }
+
+  const studentState = await getStudentFromToken(client, reqUser);
+  if (studentState.error) {
+    return studentState;
+  }
+
+  return {
+    ...studentState,
+    role: 'student',
+    readOnly: false,
   };
 }
 
@@ -1401,15 +1553,78 @@ app.post('/auth/signup', async (req, res) => {
 
 app.post('/auth/login', async (req, res) => {
   const serial = normalizeSerial(req.body.serial);
+  const role = String(req.body.role || 'student').trim().toLowerCase();
   const deviceId = String(req.body.deviceId || '').trim();
   const publicKeyPem = String(req.body.publicKeyPem || '').trim();
 
-  if (!serial || !deviceId) {
-    return res.status(400).json({ error: 'serial and deviceId are required' });
+  if (!serial) {
+    return res.status(400).json({ error: 'serial is required' });
+  }
+
+  if (role !== 'student' && role !== 'admin') {
+    return res.status(400).json({ error: 'role must be either student or admin' });
+  }
+
+  if (!deviceId) {
+    return res.status(400).json({ error: 'deviceId is required for sign-in' });
   }
 
   const client = await pool.connect();
   try {
+    if (role === 'admin') {
+      const admin = await getAdminBySerial(client, serial);
+      if (!admin) {
+        return res.status(401).json({ error: 'Admin serial number not found' });
+      }
+      if (admin.active === false) {
+        return res.status(403).json({ error: 'Admin serial is inactive' });
+      }
+
+      const existingDeviceId = String(admin.device_id || '').trim();
+      if (!existingDeviceId) {
+        await client.query(
+          `UPDATE "${adminTable}"
+           SET device_id = $1,
+               updated_at = NOW()
+           WHERE UPPER(serial_no) = UPPER($2)`,
+          [deviceId, serial],
+        );
+      } else if (existingDeviceId !== deviceId) {
+        return res.status(403).json({
+          error: 'This admin serial is already bound to another device',
+        });
+      }
+
+      if (publicKeyPem) {
+        try {
+          await client.query(
+            `UPDATE "${adminTable}"
+             SET public_key_pem = $1,
+                 updated_at = NOW()
+             WHERE UPPER(serial_no) = UPPER($2)`,
+            [publicKeyPem, serial],
+          );
+        } catch (error) {
+          if (error?.code !== '42703') throw error;
+        }
+      }
+
+      const token = jwt.sign({ role: 'admin', serial, deviceId }, JWT_SECRET, {
+        expiresIn: '30d',
+      });
+
+      return res.json({
+        token,
+        role: 'admin',
+        user: {
+          serial,
+          role: 'admin',
+          deviceId,
+          displayName: 'Admin',
+        },
+      });
+    }
+
     const student = await getStudentBySerial(client, serial);
     if (!student) {
       return res.status(401).json({ error: 'Serial number not found' });
@@ -1443,14 +1658,17 @@ app.post('/auth/login', async (req, res) => {
     }
 
     const allowedMonths = normalizeAllowedMonths(student.allowed_months);
-    const token = jwt.sign({ serial, deviceId }, JWT_SECRET, { expiresIn: '30d' });
+    const token = jwt.sign({ role: 'student', serial, deviceId }, JWT_SECRET, { expiresIn: '30d' });
 
     return res.json({
       token,
-      student: {
+      role: 'student',
+      user: {
         serial,
+        role: 'student',
         deviceId,
         availableMonths: allowedMonths,
+        displayName: String(student.full_name || '').trim(),
       },
     });
   } catch (error) {
@@ -1537,10 +1755,217 @@ app.put('/student/profile', authMiddleware, async (req, res) => {
   }
 });
 
+app.get('/admin/serials', authMiddleware, async (req, res) => {
+  const query = String(req.query.q || '').trim();
+  const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), 50);
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const hasQuery = query.length > 0;
+    const params = hasQuery
+      ? [`%${query}%`, limit]
+      : [limit];
+    const result = await client.query(
+      hasQuery
+        ? `SELECT serial_no, full_name, email, phone_number, active, created_at
+           FROM "${studentTable}"
+           WHERE UPPER(serial_no) LIKE UPPER($1)
+              OR UPPER(COALESCE(full_name, '')) LIKE UPPER($1)
+              OR UPPER(COALESCE(email, '')) LIKE UPPER($1)
+              OR COALESCE(phone_number, '') LIKE $1
+           ORDER BY created_at DESC, serial_no ASC
+           LIMIT $2`
+        : `SELECT serial_no, full_name, email, phone_number, active, created_at
+           FROM "${studentTable}"
+           ORDER BY created_at DESC, serial_no ASC
+           LIMIT $1`,
+      params,
+    );
+
+    return res.json({
+      serials: result.rows.map(mapAdminSerialRow),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to load serials: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/serials', authMiddleware, async (req, res) => {
+  const rawSerials = Array.isArray(req.body.serials) ? req.body.serials : [];
+  const serials = rawSerials
+    .map((serial) => normalizeManagedSerial(serial))
+    .filter(Boolean);
+
+  if (serials.length === 0) {
+    return res.status(400).json({ error: 'At least one valid serial is required' });
+  }
+
+  const uniqueSerials = Array.from(new Set(serials));
+  if (uniqueSerials.length !== serials.length) {
+    return res.status(400).json({ error: 'Duplicate serials were provided in the same request' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const inserted = [];
+    const duplicates = [];
+
+    for (const serial of uniqueSerials) {
+      const result = await client.query(
+        `INSERT INTO "${studentTable}" (serial_no, active, allowed_months)
+         VALUES ($1, TRUE, '')
+         ON CONFLICT (serial_no) DO NOTHING
+         RETURNING serial_no, full_name, email, phone_number, active, created_at`,
+        [serial],
+      );
+
+      if (result.rowCount > 0) {
+        inserted.push(mapAdminSerialRow(result.rows[0]));
+      } else {
+        duplicates.push(serial);
+      }
+    }
+
+    return res.status(inserted.length > 0 ? 201 : 200).json({
+      inserted,
+      duplicates,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to create serials: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.patch('/admin/serials/status', authMiddleware, async (req, res) => {
+  const rawSerials = Array.isArray(req.body.serials) ? req.body.serials : [];
+  const serials = Array.from(new Set(
+    rawSerials.map((serial) => normalizeManagedSerial(serial)).filter(Boolean),
+  ));
+  const active = req.body.active === true;
+
+  if (serials.length === 0) {
+    return res.status(400).json({ error: 'At least one valid serial is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const result = await client.query(
+      `UPDATE "${studentTable}"
+       SET active = $1,
+           updated_at = NOW()
+       WHERE UPPER(serial_no) = ANY($2::text[])
+       RETURNING serial_no, full_name, email, phone_number, active, created_at`,
+      [active, serials.map((serial) => serial.toUpperCase())],
+    );
+
+    return res.json({
+      updated: result.rows.map(mapAdminSerialRow),
+      requestedCount: serials.length,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to update serial status: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/videos', authMiddleware, async (req, res) => {
+  const title = normalizeName(req.body.title);
+  const month = normalizeMonthCode(req.body.month);
+  const session = normalizeSessionCode(req.body.session);
+  const googleDriveUrl = String(req.body.googleDriveUrl || '').trim();
+
+  if (!title) {
+    return res.status(400).json({ error: 'title is required' });
+  }
+  if (!month) {
+    return res.status(400).json({ error: 'month must be in the form M1..M12' });
+  }
+  if (!session) {
+    return res.status(400).json({ error: 'session must be in the form S1, S2, ...' });
+  }
+  if (!googleDriveUrl) {
+    return res.status(400).json({ error: 'googleDriveUrl is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    await client.query(
+      `INSERT INTO sessions (month_code, session_code, title)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (month_code, session_code)
+       DO UPDATE SET title = EXCLUDED.title`,
+      [month, session, title],
+    );
+
+    const catalog = readCatalog();
+    const index = loadGoogleDriveIndex();
+    const videoId = crypto.randomUUID();
+    const relativePath = normalizeRelativeStoragePath(
+      `external/${month}/${session}/${sanitizeStorageName(title)}-${videoId}.mp4`,
+    );
+
+    catalog.videos.push({
+      id: videoId,
+      title,
+      month,
+      session,
+      durationSec: null,
+      storage: {
+        mode: 'external',
+        relativePath,
+      },
+      createdAt: new Date().toISOString(),
+    });
+    index[relativePath] = googleDriveUrl;
+
+    writeCatalog(catalog);
+    saveGoogleDriveIndex(index);
+
+    return res.status(201).json({
+      message: 'Video record added successfully',
+      video: {
+        id: videoId,
+        title,
+        month,
+        session,
+        relativePath,
+        googleDriveUrl,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to add video record: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
 app.get('/videos', authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const authState = await getStudentFromToken(client, req.user);
+    const authState = await getContentAccessFromToken(client, req.user);
     if (authState.error) {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
@@ -1574,7 +1999,7 @@ app.get('/student/dashboard', authMiddleware, async (req, res) => {
 app.get('/quiz/status/:sessionId', authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const authState = await getStudentFromToken(client, req.user);
+    const authState = await getContentAccessFromToken(client, req.user);
     if (authState.error) {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
@@ -1606,7 +2031,7 @@ app.get('/quiz/status/:sessionId', authMiddleware, async (req, res) => {
 app.get('/quiz/content/:sessionId', authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const authState = await getStudentFromToken(client, req.user);
+    const authState = await getContentAccessFromToken(client, req.user);
     if (authState.error) {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
@@ -1839,7 +2264,7 @@ app.post('/videos/:videoId/activity', authMiddleware, async (req, res) => {
 app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const authState = await getStudentFromToken(client, req.user);
+    const authState = await getContentAccessFromToken(client, req.user);
     if (authState.error) {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
@@ -1853,6 +2278,24 @@ app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
     const month = String(video.month || '').toUpperCase();
     if (!authState.allowedMonths.includes(month)) {
       return res.status(403).json({ error: `You are not subscribed to ${month}` });
+    }
+
+    const storageMode = String(video?.storage?.mode || 'single').toLowerCase();
+    if (storageMode === 'external') {
+      return res.json({
+        videoId: String(video.id || ''),
+        storageMode,
+        algorithm: '',
+        videoNonceB64: '',
+        encryptedDataKeyB64: '',
+        plainDataKeyB64: '',
+        contentUrl: buildPagedContentUrl(video),
+        requiresAuthForContent: true,
+        totalPlainSize: null,
+        pageSize: null,
+        pageCount: null,
+        chunks: [],
+      });
     }
 
     if (!MASTER_KEY_B64) {
@@ -1893,7 +2336,6 @@ app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Invalid public key format' });
     }
 
-    const storageMode = String(video?.storage?.mode || 'single').toLowerCase();
     const chunkManifest = storageMode === 'chunked' ? buildChunkManifest(video) : [];
     const contentUrl = storageMode === 'chunked' ? '' : buildPagedContentUrl(video);
     const totalPlainSize = Number(video?.storage?.totalPlainSize) || null;
@@ -1924,7 +2366,7 @@ app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
 app.get(/^\/storage\/(.+)$/, authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const authState = await getStudentFromToken(client, req.user);
+    const authState = await getContentAccessFromToken(client, req.user);
     if (authState.error) {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
@@ -1962,7 +2404,7 @@ app.get(/^\/storage\/(.+)$/, authMiddleware, async (req, res) => {
 app.get(/^\/pdf\/(.+)$/, authMiddleware, async (req, res) => {
   const client = await pool.connect();
   try {
-    const authState = await getStudentFromToken(client, req.user);
+    const authState = await getContentAccessFromToken(client, req.user);
     if (authState.error) {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
@@ -2011,7 +2453,7 @@ app.get('/videos/:videoId/plain', authMiddleware, async (req, res) => {
 
   const client = await pool.connect();
   try {
-    const authState = await getStudentFromToken(client, req.user);
+    const authState = await getContentAccessFromToken(client, req.user);
     if (authState.error) {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
