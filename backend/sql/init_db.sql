@@ -78,9 +78,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   month_code TEXT NOT NULL,
   session_code TEXT NOT NULL,
   title TEXT NULL,
+  video_metadata JSONB NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (month_code, session_code)
 );
+
+ALTER TABLE sessions
+  ADD COLUMN IF NOT EXISTS video_metadata JSONB NULL;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_month_session
   ON sessions (month_code, session_code);

@@ -367,7 +367,7 @@ async function ensureCatalogSessions(client, catalog) {
 
 async function loadSessionMap(client) {
   const result = await client.query(
-    `SELECT id, month_code, session_code, title
+    `SELECT id, month_code, session_code, title, video_metadata
      FROM sessions`,
   );
 
@@ -379,6 +379,210 @@ async function loadSessionMap(client) {
     map.set(`${month}:${session}`, row);
   }
   return map;
+}
+
+function normalizeSessionVideoMetadata(value) {
+  let raw = value && typeof value === 'object' ? value : null;
+  if (!raw && typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      raw = parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      raw = null;
+    }
+  }
+  if (!raw) {
+    return null;
+  }
+
+  const id = String(raw.id || '').trim();
+  const wrappedKeyB64 = String(raw?.encryption?.keyWrap?.wrappedKeyB64 || '').trim();
+  const wrapNonceB64 = String(raw?.encryption?.keyWrap?.nonceB64 || '').trim();
+  const storageMode = String(raw?.storage?.mode || 'paged').trim().toLowerCase() || 'paged';
+  const totalPlainSize = Number(raw?.storage?.totalPlainSize);
+  const pageSize = Number(raw?.storage?.pageSize);
+  const pageCount = Number(raw?.storage?.pageCount);
+  const createdAtRaw = String(raw.createdAt || '').trim();
+  const createdAtDate = createdAtRaw ? new Date(createdAtRaw) : new Date();
+
+  if (!id || !wrappedKeyB64 || !wrapNonceB64) {
+    return null;
+  }
+
+  return {
+    id,
+    encryption: {
+      algorithm: String(raw?.encryption?.algorithm || 'AES-256-GCM').trim() || 'AES-256-GCM',
+      nonceB64: String(raw?.encryption?.nonceB64 || '').trim(),
+      keyWrap: {
+        algorithm: String(raw?.encryption?.keyWrap?.algorithm || 'AES-256-GCM').trim() || 'AES-256-GCM',
+        nonceB64: wrapNonceB64,
+        wrappedKeyB64,
+      },
+    },
+    storage: {
+      mode: storageMode,
+      totalPlainSize: Number.isFinite(totalPlainSize) ? totalPlainSize : null,
+      pageSize: Number.isFinite(pageSize) ? pageSize : null,
+      pageCount: Number.isFinite(pageCount) ? pageCount : null,
+    },
+    createdAt: Number.isNaN(createdAtDate.getTime())
+      ? new Date().toISOString()
+      : createdAtDate.toISOString(),
+  };
+}
+
+function buildSessionVideoRecord(row) {
+  const month = normalizeMonthCode(row?.month_code);
+  const session = normalizeSessionCode(row?.session_code);
+  const title = normalizeName(row?.title);
+  const metadata = normalizeSessionVideoMetadata(row?.video_metadata);
+
+  if (!month || !session || !title || !metadata) {
+    return null;
+  }
+
+  return {
+    id: metadata.id,
+    title,
+    month,
+    session,
+    durationSec: null,
+    encryption: metadata.encryption,
+    storage: metadata.storage,
+    createdAt: metadata.createdAt,
+  };
+}
+
+function buildSessionVideoRelativePath(rowOrRecord) {
+  const month = normalizeMonthCode(rowOrRecord?.month_code || rowOrRecord?.month);
+  const session = normalizeSessionCode(rowOrRecord?.session_code || rowOrRecord?.session);
+  const metadata = normalizeSessionVideoMetadata(rowOrRecord?.video_metadata) || rowOrRecord;
+  const videoId = String(metadata?.id || '').trim();
+  if (!month || !session || !videoId) {
+    return '';
+  }
+  return `encrypted/${month}/${session}/${videoId}.enc`;
+}
+
+function buildSessionVideoContentUrl(videoId) {
+  return `/videos/${encodeURIComponent(String(videoId || '').trim())}/content`;
+}
+
+async function loadVideoEnabledSessionRows(client) {
+  const result = await client.query(
+    `SELECT id, month_code, session_code, title, video_metadata
+     FROM sessions
+     WHERE video_metadata IS NOT NULL`,
+  );
+
+  return result.rows
+    .map((row) => ({
+      ...row,
+      normalizedVideo: buildSessionVideoRecord(row),
+    }))
+    .filter((row) => row.normalizedVideo);
+}
+
+async function findVideoSessionRowByVideoId(client, videoId) {
+  const result = await client.query(
+    `SELECT id, month_code, session_code, title, video_metadata
+     FROM sessions
+     WHERE video_metadata IS NOT NULL
+       AND video_metadata->>'id' = $1
+     LIMIT 1`,
+    [String(videoId || '').trim()],
+  );
+
+  if (result.rowCount === 0) {
+    return null;
+  }
+
+  const row = result.rows[0];
+  const normalizedVideo = buildSessionVideoRecord(row);
+  if (!normalizedVideo) {
+    return null;
+  }
+
+  return {
+    ...row,
+    normalizedVideo,
+  };
+}
+
+function localEncryptedFileCandidates(relativePath) {
+  const normalized = normalizeRelativeStoragePath(relativePath);
+  if (!normalized) {
+    return [];
+  }
+
+  const repoRoot = path.join(__dirname, '..', '..');
+  return [
+    path.join(repoRoot, normalized),
+    path.join(dataDir, normalized),
+  ];
+}
+
+function normalizePendingEncryptedVideoRecord(value) {
+  const raw = value && typeof value === 'object' ? value : null;
+  if (!raw) {
+    return { error: 'video record is required' };
+  }
+
+  const id = String(raw.id || '').trim() || crypto.randomUUID();
+  const title = normalizeName(raw.title);
+  const month = normalizeMonthCode(raw.month);
+  const session = normalizeSessionCode(raw.session);
+  const wrappedKeyB64 = String(raw?.encryption?.keyWrap?.wrappedKeyB64 || '').trim();
+  const wrapNonceB64 = String(raw?.encryption?.keyWrap?.nonceB64 || '').trim();
+  const totalPlainSize = Number(raw?.storage?.totalPlainSize);
+  const pageSize = Number(raw?.storage?.pageSize);
+  const pageCount = Number(raw?.storage?.pageCount);
+  const createdAtRaw = String(raw.createdAt || '').trim();
+  const createdAtDate = createdAtRaw ? new Date(createdAtRaw) : new Date();
+
+  if (!title) {
+    return { error: 'Encrypted video title is required' };
+  }
+  if (!month) {
+    return { error: 'Encrypted video month must be in the form M1..M12' };
+  }
+  if (!session) {
+    return { error: 'Encrypted video session must be in the form S1, S2, ...' };
+  }
+  if (!wrappedKeyB64 || !wrapNonceB64) {
+    return { error: 'Encrypted video key-wrap metadata is missing' };
+  }
+
+  return {
+    record: {
+      id,
+      title,
+      month,
+      session,
+      videoMetadata: {
+        id,
+        encryption: {
+          algorithm: String(raw?.encryption?.algorithm || 'AES-256-GCM').trim() || 'AES-256-GCM',
+          nonceB64: String(raw?.encryption?.nonceB64 || '').trim(),
+          keyWrap: {
+            algorithm: String(raw?.encryption?.keyWrap?.algorithm || 'AES-256-GCM').trim() || 'AES-256-GCM',
+            nonceB64: wrapNonceB64,
+            wrappedKeyB64,
+          },
+        },
+        storage: {
+          mode: String(raw?.storage?.mode || 'paged').trim().toLowerCase() || 'paged',
+          totalPlainSize: Number.isFinite(totalPlainSize) ? totalPlainSize : null,
+          pageSize: Number.isFinite(pageSize) ? pageSize : null,
+          pageCount: Number.isFinite(pageCount) ? pageCount : null,
+        },
+        createdAt: Number.isNaN(createdAtDate.getTime())
+          ? new Date().toISOString()
+          : createdAtDate.toISOString(),
+      },
+    },
+  };
 }
 
 async function getSessionById(client, sessionId) {
@@ -420,22 +624,15 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
   const catalog = readCatalog();
   const googleDriveIndex = loadGoogleDriveIndex();
   await ensureCatalogSessions(client, catalog);
+  await syncLegacyCatalogVideosToSessions(client, catalog);
   const sessionMap = await loadSessionMap(client);
+  const videoRows = await loadVideoEnabledSessionRows(client);
   const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client);
 
   const months = allowedMonths.map((month) => {
-    const catalogVideos = catalog.videos
-      .filter((video) => isCatalogVideoPublished(googleDriveIndex, video))
-      .filter((video) => String(video?.month || '').toUpperCase() === month)
-      .map((video) => ({
-        id: String(video.id || ''),
-        title: String(video.title || 'Record'),
-        month,
-        session: String(video.session || 'S1').toUpperCase(),
-        durationSec: Number.isFinite(video.durationSec) ? Number(video.durationSec) : null,
-      }))
-      .filter((video) => video.id);
-    const videos = catalogVideos;
+    const videos = videoRows
+      .filter((row) => normalizeMonthCode(row.month_code) === month)
+      .map((row) => row.normalizedVideo);
 
     const pdfs = catalog.pdfs
       .filter((pdf) => isStorageEntryPublished(googleDriveIndex, pdf?.storage))
@@ -455,23 +652,15 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
       })
       .filter((pdf) => pdf.id && pdf.downloadUrl);
 
-    const quizSessions = new Map();
-    for (const video of videos) {
-      quizSessions.set(String(video.session || '').toUpperCase(), true);
-    }
-    for (const pdf of pdfs) {
-      quizSessions.set(String(pdf.session || '').toUpperCase(), true);
-    }
-
-    const quizzes = Array.from(quizSessions.keys()).map((sessionCode) => {
-      const sessionRow = sessionMap.get(`${month}:${sessionCode}`);
-      return {
+    const quizzes = Array.from(sessionMap.values())
+      .filter((row) => normalizeMonthCode(row.month_code) === month)
+      .map((row) => ({
         month,
-        session: sessionCode,
-        sessionId: sessionRow?.id ? String(sessionRow.id) : '',
-        hasQuiz: Boolean(sessionRow?.id && quizEnabledSessionIds.has(String(sessionRow.id))),
-      };
-    }).filter((quiz) => quiz.hasQuiz && quiz.sessionId);
+        session: normalizeSessionCode(row.session_code),
+        sessionId: row?.id ? String(row.id) : '',
+        hasQuiz: Boolean(row?.id && quizEnabledSessionIds.has(String(row.id))),
+      }))
+      .filter((quiz) => quiz.session && quiz.hasQuiz && quiz.sessionId);
 
     return { month, videos, pdfs, quizzes };
   });
@@ -1222,6 +1411,42 @@ function loadGoogleDriveIndex() {
       value: {},
     };
     return {};
+  }
+}
+
+async function syncLegacyCatalogVideosToSessions(client, catalog) {
+  for (const video of catalog?.videos || []) {
+    const normalized = normalizeEncryptedVideoCatalogRecord(video);
+    if (normalized.error) {
+      continue;
+    }
+
+    const record = normalized.record;
+    const videoMetadata = {
+      id: record.id,
+      encryption: record.encryption,
+      storage: {
+        mode: String(record?.storage?.mode || 'paged').trim().toLowerCase() || 'paged',
+        totalPlainSize: Number(record?.storage?.totalPlainSize) || null,
+        pageSize: Number(record?.storage?.pageSize) || null,
+        pageCount: Number(record?.storage?.pageCount) || null,
+      },
+      createdAt: String(record.createdAt || '').trim() || new Date().toISOString(),
+    };
+
+    await client.query(
+      `INSERT INTO sessions (month_code, session_code, title, video_metadata)
+       VALUES ($1, $2, $3, $4::jsonb)
+       ON CONFLICT (month_code, session_code)
+       DO UPDATE SET title = COALESCE(NULLIF(EXCLUDED.title, ''), sessions.title),
+                     video_metadata = COALESCE(sessions.video_metadata, EXCLUDED.video_metadata)`,
+      [
+        record.month,
+        record.session,
+        record.title,
+        JSON.stringify(videoMetadata),
+      ],
+    );
   }
 }
 
@@ -2004,18 +2229,9 @@ app.patch('/admin/serials/status', authMiddleware, async (req, res) => {
 });
 
 app.post('/admin/videos', authMiddleware, async (req, res) => {
-  const title = normalizeName(req.body.title);
-  const month = normalizeMonthCode(req.body.month);
-  const session = normalizeSessionCode(req.body.session);
-
-  if (!title) {
-    return res.status(400).json({ error: 'title is required' });
-  }
-  if (!month) {
-    return res.status(400).json({ error: 'month must be in the form M1..M12' });
-  }
-  if (!session) {
-    return res.status(400).json({ error: 'session must be in the form S1, S2, ...' });
+  const normalized = normalizePendingEncryptedVideoRecord(req.body?.video);
+  if (normalized.error) {
+    return res.status(400).json({ error: normalized.error });
   }
 
   const client = await pool.connect();
@@ -2025,65 +2241,32 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
       return res.status(adminState.status || 403).json({ error: adminState.error });
     }
 
+    const videoRecord = normalized.record;
     await client.query(
-      `INSERT INTO sessions (month_code, session_code, title)
-       VALUES ($1, $2, $3)
+      `INSERT INTO sessions (month_code, session_code, title, video_metadata)
+       VALUES ($1, $2, $3, $4::jsonb)
        ON CONFLICT (month_code, session_code)
-       DO UPDATE SET title = EXCLUDED.title`,
-      [month, session, title],
+       DO UPDATE SET title = EXCLUDED.title,
+                     video_metadata = EXCLUDED.video_metadata`,
+      [
+        videoRecord.month,
+        videoRecord.session,
+        videoRecord.title,
+        JSON.stringify(videoRecord.videoMetadata),
+      ],
     );
 
-    const catalog = readCatalog();
-    const existingIndex = catalog.videos.findIndex((entry) => (
-      normalizeMonthCode(entry?.month) === month
-      && normalizeSessionCode(entry?.session) === session
-      && String(entry?.storage?.mode || '').trim().toLowerCase() === 'external'
-    ));
-
-    const existingEntry = existingIndex >= 0 ? catalog.videos[existingIndex] : null;
-    const videoId = String(existingEntry?.id || '').trim() || crypto.randomUUID();
-    const existingRelativePath = normalizeRelativeStoragePath(
-      existingEntry?.storage?.relativePath,
-    );
-    const relativePath = normalizeRelativeStoragePath(
-      /^encrypted\//i.test(existingRelativePath)
-        ? existingRelativePath
-        : `encrypted/${month}/${session}/${sanitizeStorageName(title)}`,
-    );
-
-    const videoRecord = {
-      ...(existingEntry && typeof existingEntry === 'object' ? existingEntry : {}),
-      id: videoId,
-      title,
-      month,
-      session,
-      durationSec: null,
-      storage: {
-        mode: 'external',
-        relativePath,
-      },
-      createdAt: String(existingEntry?.createdAt || '').trim() || new Date().toISOString(),
-    };
-
-    if (existingIndex >= 0) {
-      catalog.videos[existingIndex] = videoRecord;
-    } else {
-      catalog.videos.push(videoRecord);
-    }
-    writeCatalog(catalog);
-
-    return res.status(existingIndex >= 0 ? 200 : 201).json({
-      message: 'Video record added to remote catalog successfully',
+    return res.status(201).json({
+      message: 'Encrypted video session saved successfully',
       video: {
-        id: videoId,
-        title,
-        month,
-        session,
-        relativePath,
+        id: videoRecord.id,
+        title: videoRecord.title,
+        month: videoRecord.month,
+        session: videoRecord.session,
         catalogUpdated: true,
-        catalogMessage: 'Remote catalog updated successfully',
+        catalogMessage: 'Session table updated successfully',
         googleDriveIndexUpdated: false,
-        googleDriveIndexMessage: 'Pending Google Drive mapping',
+        googleDriveIndexMessage: '',
       },
     });
   } catch (error) {
@@ -2498,34 +2681,18 @@ app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
       return res.status(authState.status || 401).json({ error: authState.error });
     }
 
-    const catalog = readCatalog();
-    const video = catalog.videos.find((entry) => String(entry?.id || '') === req.params.videoId);
-    if (!video) {
+    const sessionRow = await findVideoSessionRowByVideoId(client, req.params.videoId);
+    if (!sessionRow) {
       return res.status(404).json({ error: 'Video not found' });
     }
 
+    const video = sessionRow.normalizedVideo;
     const month = String(video.month || '').toUpperCase();
     if (!authState.allowedMonths.includes(month)) {
       return res.status(403).json({ error: `You are not subscribed to ${month}` });
     }
 
-    const storageMode = String(video?.storage?.mode || 'single').toLowerCase();
-    if (storageMode === 'external') {
-      return res.json({
-        videoId: String(video.id || ''),
-        storageMode,
-        algorithm: '',
-        videoNonceB64: '',
-        encryptedDataKeyB64: '',
-        plainDataKeyB64: '',
-        contentUrl: buildPagedContentUrl(video),
-        requiresAuthForContent: true,
-        totalPlainSize: null,
-        pageSize: null,
-        pageCount: null,
-        chunks: [],
-      });
-    }
+    const storageMode = String(video?.storage?.mode || 'paged').toLowerCase();
 
     if (!MASTER_KEY_B64) {
       return res.status(500).json({ error: 'Server is missing MASTER_KEY_B64' });
@@ -2568,8 +2735,8 @@ app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
       }
     }
 
-    const chunkManifest = storageMode === 'chunked' ? buildChunkManifest(video) : [];
-    const contentUrl = storageMode === 'chunked' ? '' : buildPagedContentUrl(video);
+    const chunkManifest = [];
+    const contentUrl = buildSessionVideoContentUrl(video.id);
     const totalPlainSize = Number(video?.storage?.totalPlainSize) || null;
     const pageSize = Number(video?.storage?.pageSize) || null;
     const pageCount = Number(video?.storage?.pageCount) || null;
@@ -2590,6 +2757,65 @@ app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: `Failed to issue playback license: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/videos/:videoId/content', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authState = await getContentAccessFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status || 401).json({ error: authState.error });
+    }
+
+    const sessionRow = await findVideoSessionRowByVideoId(client, req.params.videoId);
+    if (!sessionRow) {
+      return res.status(404).json({ error: 'Video not found' });
+    }
+
+    const video = sessionRow.normalizedVideo;
+    const month = String(video.month || '').toUpperCase();
+    if (!authState.allowedMonths.includes(month)) {
+      return res.status(403).json({ error: `You are not subscribed to ${month}` });
+    }
+
+    const derivedRelativePath = buildSessionVideoRelativePath(sessionRow);
+    for (const candidatePath of localEncryptedFileCandidates(derivedRelativePath)) {
+      if (fs.existsSync(candidatePath)) {
+        return res.sendFile(candidatePath);
+      }
+    }
+
+    const catalog = readCatalog();
+    const legacyVideo = catalog.videos.find((entry) => String(entry?.id || '') === String(video.id || ''));
+    if (legacyVideo?.storage?.relativePath) {
+      const legacyRelativePath = normalizeRelativeStoragePath(legacyVideo.storage.relativePath);
+      for (const candidatePath of localEncryptedFileCandidates(legacyRelativePath)) {
+        if (fs.existsSync(candidatePath)) {
+          return res.sendFile(candidatePath);
+        }
+      }
+      const driveUrl = await resolveGoogleDriveUrl(legacyRelativePath, legacyVideo.storage);
+      if (driveUrl) {
+        return res.redirect(302, driveUrl);
+      }
+    }
+
+    const driveUrl = await resolveGoogleDriveUrl(
+      derivedRelativePath,
+      { relativePath: derivedRelativePath },
+    );
+    if (driveUrl) {
+      return res.redirect(302, driveUrl);
+    }
+
+    return res.status(404).json({
+      error: `Encrypted content file for ${video.id} was not found locally or in Google Drive.`,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to resolve encrypted content URL: ${error.message}` });
   } finally {
     client.release();
   }
