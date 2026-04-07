@@ -1424,6 +1424,120 @@ function sanitizeStorageName(value) {
   return normalized || 'video';
 }
 
+function normalizeEncryptedCatalogRelativePath(value) {
+  const normalized = normalizeRelativeStoragePath(value);
+  if (!normalized) return '';
+
+  if (/^encrypted\//i.test(normalized)) {
+    return normalized;
+  }
+
+  const parts = normalized.split('/').filter(Boolean);
+  const encryptedIndex = parts.findIndex((part) => part.toLowerCase() === 'encrypted');
+  if (encryptedIndex >= 0) {
+    return parts.slice(encryptedIndex).join('/');
+  }
+
+  return normalized;
+}
+
+function inferMonthAndSessionFromRelativePath(relativePath) {
+  const match = normalizeEncryptedCatalogRelativePath(relativePath)
+    .match(/^encrypted\/(M(1[0-2]|[1-9]))\/(S\d+)\//i);
+  if (!match) {
+    return { month: '', session: '' };
+  }
+
+  return {
+    month: normalizeMonthCode(match[1]),
+    session: normalizeSessionCode(match[3]),
+  };
+}
+
+function normalizeEncryptedVideoCatalogRecord(value) {
+  const raw = value && typeof value === 'object' ? value : null;
+  if (!raw) {
+    return { error: 'video record is required' };
+  }
+
+  const relativePath = normalizeEncryptedCatalogRelativePath(raw?.storage?.relativePath);
+  const inferred = inferMonthAndSessionFromRelativePath(relativePath);
+  const month = normalizeMonthCode(raw.month) || inferred.month;
+  const session = normalizeSessionCode(raw.session) || inferred.session;
+  const title = normalizeName(raw.title);
+  const id = String(raw.id || '').trim() || crypto.randomUUID();
+  const sourceFile = String(raw.sourceFile || '').trim();
+  const storageMode = String(raw?.storage?.mode || 'paged').trim().toLowerCase() || 'paged';
+
+  if (!title) {
+    return { error: 'Encrypted video title is required' };
+  }
+  if (!month) {
+    return { error: 'Encrypted video month must be in the form M1..M12' };
+  }
+  if (!session) {
+    return { error: 'Encrypted video session must be in the form S1, S2, ...' };
+  }
+  if (!relativePath || !/^encrypted\//i.test(relativePath)) {
+    return { error: 'Encrypted video relativePath must point to encrypted/... on the server' };
+  }
+
+  const wrappedKeyB64 = String(raw?.encryption?.keyWrap?.wrappedKeyB64 || '').trim();
+  const wrapNonceB64 = String(raw?.encryption?.keyWrap?.nonceB64 || '').trim();
+  if (!wrappedKeyB64 || !wrapNonceB64) {
+    return { error: 'Encrypted video key-wrap metadata is missing' };
+  }
+
+  const rawDurationSec = raw?.durationSec;
+  const rawTotalPlainSize = raw?.storage?.totalPlainSize;
+  const rawPageSize = raw?.storage?.pageSize;
+  const rawPageCount = raw?.storage?.pageCount;
+  const durationSec = rawDurationSec === null || rawDurationSec === undefined || rawDurationSec === ''
+    ? NaN
+    : Number(rawDurationSec);
+  const totalPlainSize = rawTotalPlainSize === null || rawTotalPlainSize === undefined || rawTotalPlainSize === ''
+    ? NaN
+    : Number(rawTotalPlainSize);
+  const pageSize = rawPageSize === null || rawPageSize === undefined || rawPageSize === ''
+    ? NaN
+    : Number(rawPageSize);
+  const pageCount = rawPageCount === null || rawPageCount === undefined || rawPageCount === ''
+    ? NaN
+    : Number(rawPageCount);
+  const createdAtRaw = String(raw.createdAt || '').trim();
+  const createdAtDate = createdAtRaw ? new Date(createdAtRaw) : new Date();
+
+  return {
+    record: {
+      id,
+      title,
+      month,
+      session,
+      sourceFile,
+      durationSec: Number.isFinite(durationSec) ? durationSec : null,
+      encryption: {
+        algorithm: String(raw?.encryption?.algorithm || 'AES-256-GCM').trim() || 'AES-256-GCM',
+        nonceB64: String(raw?.encryption?.nonceB64 || '').trim(),
+        keyWrap: {
+          algorithm: String(raw?.encryption?.keyWrap?.algorithm || 'AES-256-GCM').trim() || 'AES-256-GCM',
+          nonceB64: wrapNonceB64,
+          wrappedKeyB64,
+        },
+      },
+      storage: {
+        mode: storageMode,
+        relativePath,
+        totalPlainSize: Number.isFinite(totalPlainSize) ? totalPlainSize : null,
+        pageSize: Number.isFinite(pageSize) ? pageSize : null,
+        pageCount: Number.isFinite(pageCount) ? pageCount : null,
+      },
+      createdAt: Number.isNaN(createdAtDate.getTime())
+        ? new Date().toISOString()
+        : createdAtDate.toISOString(),
+    },
+  };
+}
+
 async function getStudentFromToken(client, reqUser) {
   if (String(reqUser?.role || '').trim().toLowerCase() === 'admin') {
     return { error: 'Invalid student session', status: 403 };
@@ -1998,6 +2112,59 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: `Failed to add video record: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/encrypted-videos/catalog', authMiddleware, async (req, res) => {
+  const normalized = normalizeEncryptedVideoCatalogRecord(req.body?.video);
+  if (normalized.error) {
+    return res.status(400).json({ error: normalized.error });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const videoRecord = normalized.record;
+    await client.query(
+      `INSERT INTO sessions (month_code, session_code, title)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (month_code, session_code)
+       DO UPDATE SET title = EXCLUDED.title`,
+      [videoRecord.month, videoRecord.session, videoRecord.title],
+    );
+
+    const catalog = readCatalog();
+    const existingIndex = catalog.videos.findIndex((entry) => {
+      const entryId = String(entry?.id || '').trim();
+      const entryRelativePath = normalizeEncryptedCatalogRelativePath(
+        entry?.storage?.relativePath,
+      );
+      return entryId === videoRecord.id || entryRelativePath === videoRecord.storage.relativePath;
+    });
+
+    if (existingIndex >= 0) {
+      catalog.videos[existingIndex] = {
+        ...catalog.videos[existingIndex],
+        ...videoRecord,
+      };
+    } else {
+      catalog.videos.push(videoRecord);
+    }
+
+    writeCatalog(catalog);
+
+    return res.status(existingIndex >= 0 ? 200 : 201).json({
+      message: 'Encrypted video record synced to remote catalog successfully',
+      video: videoRecord,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to sync encrypted video catalog: ${error.message}` });
   } finally {
     client.release();
   }
