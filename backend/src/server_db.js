@@ -470,12 +470,15 @@ function extractMonthNumber(value) {
 
 async function buildAuthorizedMonthsPayload(client, allowedMonths) {
   const catalog = readCatalog();
+  const googleDriveIndex = loadGoogleDriveIndex();
   await ensureCatalogSessions(client, catalog);
   const sessionMap = await loadSessionMap(client);
   const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client);
+  const records = await getRecordsRows(client);
 
-  let months = allowedMonths.map((month) => {
-    const videos = catalog.videos
+  const months = allowedMonths.map((month) => {
+    const catalogVideos = catalog.videos
+      .filter((video) => isCatalogVideoPublished(googleDriveIndex, video))
       .filter((video) => String(video?.month || '').toUpperCase() === month)
       .map((video) => ({
         id: String(video.id || ''),
@@ -486,7 +489,25 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
       }))
       .filter((video) => video.id);
 
+    const monthKey = monthColumn(month);
+    const fallbackVideos = records
+      .map((record) => {
+        const url = normalizeRecordUrl(record[monthKey]);
+        if (!url) return null;
+        return {
+          id: `${month}_${record.record_no}`,
+          title: `Record ${record.record_no}`,
+          month,
+          session: 'S1',
+          durationSec: null,
+        };
+      })
+      .filter(Boolean);
+
+    const videos = [...catalogVideos, ...fallbackVideos];
+
     const pdfs = catalog.pdfs
+      .filter((pdf) => isStorageEntryPublished(googleDriveIndex, pdf?.storage))
       .filter((pdf) => String(pdf?.month || '').toUpperCase() === month)
       .map((pdf) => {
         const relativePath = String(pdf?.storage?.relativePath || '').replaceAll('\\', '/');
@@ -523,37 +544,6 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
 
     return { month, videos, pdfs, quizzes };
   });
-
-  const hasCatalogVideos = months.some((month) => month.videos.length > 0);
-  if (!hasCatalogVideos) {
-    const records = await getRecordsRows(client);
-    months = allowedMonths.map((month) => {
-      const monthKey = monthColumn(month);
-      const videos = records
-        .map((record) => {
-          const url = normalizeRecordUrl(record[monthKey]);
-          if (!url) return null;
-          return {
-            id: `${month}_${record.record_no}`,
-            title: `Record ${record.record_no}`,
-            month,
-            session: 'S1',
-            durationSec: null,
-          };
-        })
-        .filter(Boolean);
-
-      const sessionRow = sessionMap.get(`${month}:S1`);
-      return {
-        month,
-        videos,
-        pdfs: [],
-        quizzes: sessionRow?.id && quizEnabledSessionIds.has(String(sessionRow.id))
-          ? [{ month, session: 'S1', sessionId: String(sessionRow.id), hasQuiz: true }]
-          : [],
-      };
-    });
-  }
 
   return months;
 }
@@ -1343,6 +1333,47 @@ function resolveGoogleDriveIndexEntry(index, relativePath) {
   return null;
 }
 
+function hasPublishedGoogleDriveTarget(storageEntry) {
+  const directCandidates = [
+    storageEntry?.googleDriveUrl,
+    storageEntry?.driveUrl,
+    storageEntry?.downloadUrl,
+    storageEntry?.publicUrl,
+    storageEntry?.googleDriveFileId,
+    storageEntry?.driveFileId,
+    storageEntry?.fileId,
+  ];
+
+  return directCandidates.some((candidate) => Boolean(normalizeGoogleDriveValue(candidate)));
+}
+
+function isStorageEntryPublished(index, storageEntry) {
+  if (!storageEntry || typeof storageEntry !== 'object') {
+    return false;
+  }
+
+  if (hasPublishedGoogleDriveTarget(storageEntry)) {
+    return true;
+  }
+
+  const relativePath = normalizeRelativeStoragePath(storageEntry.relativePath);
+  if (!relativePath) {
+    return false;
+  }
+
+  return Boolean(resolveGoogleDriveIndexEntry(index, relativePath));
+}
+
+function isCatalogVideoPublished(index, video) {
+  const storage = video?.storage || {};
+  if (isStorageEntryPublished(index, storage)) {
+    return true;
+  }
+
+  const chunks = Array.isArray(storage?.chunks) ? storage.chunks : [];
+  return chunks.some((chunk) => isStorageEntryPublished(index, chunk));
+}
+
 async function resolveGoogleDriveUrl(relativePath, storageEntry) {
   const directCandidates = [
     storageEntry?.googleDriveUrl,
@@ -2108,6 +2139,8 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
         session,
         relativePath,
         googleDriveUrl,
+        catalogUpdated: true,
+        googleDriveIndexUpdated: true,
       },
     });
   } catch (error) {
