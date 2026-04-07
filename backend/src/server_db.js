@@ -143,6 +143,11 @@ function decodePublicKeyPemHeader(req) {
   }
 }
 
+function isDesktopClientRequest(req) {
+  const platform = String(req.get('x-client-platform') || '').trim().toLowerCase();
+  return platform === 'windows' || platform === 'linux' || platform === 'macos';
+}
+
 function normalizeAvatarDataUrl(value) {
   const normalized = String(value || '').trim();
   if (!normalized) return '';
@@ -997,7 +1002,12 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
   };
 }
 
-async function buildQuizContentPayload(client, sessionRow, publicKeyPem = '') {
+async function buildQuizContentPayload(
+  client,
+  sessionRow,
+  publicKeyPem = '',
+  allowPlainMetadataKey = false,
+) {
   const quizSessionConfig = await getQuizSessionConfig(client, sessionRow.id);
   if (!quizSessionConfig) {
     return {
@@ -1014,11 +1024,11 @@ async function buildQuizContentPayload(client, sessionRow, publicKeyPem = '') {
   }
 
   const definition = await buildFolderQuizDefinition(quizSessionConfig);
-  if (!publicKeyPem) {
+  if (!publicKeyPem && !allowPlainMetadataKey) {
     throw new Error('Missing student public key for encrypted quiz metadata');
   }
 
-  const encryptedPackage = encryptJsonForStudent(publicKeyPem, {
+  const quizPayload = {
     version: 1,
     sessionId: String(sessionRow.id),
     month: String(sessionRow.month_code || ''),
@@ -1029,7 +1039,25 @@ async function buildQuizContentPayload(client, sessionRow, publicKeyPem = '') {
       correct: question.correctOptionIndex,
       points: question.points,
     })),
-  });
+  };
+
+  let encryptedPackage;
+  if (publicKeyPem) {
+    encryptedPackage = encryptJsonForStudent(publicKeyPem, quizPayload);
+  } else {
+    const json = JSON.stringify(quizPayload);
+    const dataKey = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', dataKey, iv);
+    const encrypted = Buffer.concat([cipher.update(json, 'utf8'), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    encryptedPackage = {
+      encryptedPackageB64: Buffer.concat([encrypted, authTag]).toString('base64'),
+      encryptedPackageKeyB64: '',
+      plainPackageKeyB64: dataKey.toString('base64'),
+      packageNonceB64: iv.toString('base64'),
+    };
+  }
 
   return {
     hasQuiz: definition.questionCount > 0,
@@ -1052,6 +1080,9 @@ async function buildQuizContentPayload(client, sessionRow, publicKeyPem = '') {
       })),
       encryptedMetadataB64: encryptedPackage.encryptedPackageB64,
       encryptedMetadataKeyB64: encryptedPackage.encryptedPackageKeyB64,
+      plainMetadataKeyB64: allowPlainMetadataKey
+        ? String(encryptedPackage.plainPackageKeyB64 || '')
+        : '',
       metadataNonceB64: encryptedPackage.packageNonceB64,
     },
   };
@@ -2057,12 +2088,16 @@ app.get('/quiz/content/:sessionId', authMiddleware, async (req, res) => {
     }
 
     const requestPublicKeyPem = decodePublicKeyPemHeader(req);
-    const effectivePublicKeyPem = requestPublicKeyPem || String(authState.student.public_key_pem || '').trim();
+    const allowPlainMetadataKey = isDesktopClientRequest(req);
+    const effectivePublicKeyPem = allowPlainMetadataKey
+      ? requestPublicKeyPem
+      : (requestPublicKeyPem || String(authState.student.public_key_pem || '').trim());
 
     const payload = await buildQuizContentPayload(
       client,
       sessionRow,
       effectivePublicKeyPem,
+      allowPlainMetadataKey,
     );
     return res.json(payload);
   } catch (error) {
@@ -2331,22 +2366,25 @@ app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
       return res.status(500).json({ error: 'Failed to unwrap data key' });
     }
 
+    const allowPlainDataKey = isDesktopClientRequest(req);
     const publicKeyPem = String(req.body.publicKeyPem || authState.student.public_key_pem || '').trim();
-    if (!publicKeyPem) {
+    if (!publicKeyPem && !allowPlainDataKey) {
       return res.status(400).json({ error: 'Missing student public key' });
     }
 
-    let encryptedDataKey;
-    try {
-      encryptedDataKey = crypto.publicEncrypt(
-        {
-          key: publicKeyPem,
-          padding: crypto.constants.RSA_PKCS1_PADDING,
-        },
-        dataKey,
-      );
-    } catch {
-      return res.status(400).json({ error: 'Invalid public key format' });
+    let encryptedDataKey = Buffer.alloc(0);
+    if (!allowPlainDataKey) {
+      try {
+        encryptedDataKey = crypto.publicEncrypt(
+          {
+            key: publicKeyPem,
+            padding: crypto.constants.RSA_PKCS1_PADDING,
+          },
+          dataKey,
+        );
+      } catch {
+        return res.status(400).json({ error: 'Invalid public key format' });
+      }
     }
 
     const chunkManifest = storageMode === 'chunked' ? buildChunkManifest(video) : [];
@@ -2361,7 +2399,7 @@ app.post('/videos/:videoId/license', authMiddleware, async (req, res) => {
       algorithm: 'AES-256-GCM',
       videoNonceB64: storageMode === 'single' ? String(video.encryption?.nonceB64 || '') : '',
       encryptedDataKeyB64: encryptedDataKey.toString('base64'),
-      plainDataKeyB64: '',
+      plainDataKeyB64: allowPlainDataKey ? dataKey.toString('base64') : '',
       contentUrl,
       requiresAuthForContent: true,
       totalPlainSize,
