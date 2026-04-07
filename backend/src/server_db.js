@@ -72,7 +72,6 @@ const QUIZ_APP_SCRIPT_URL = String(process.env.QUIZ_APP_SCRIPT_URL || '').trim()
 
 const STUDENT_SERIALS_TABLE = process.env.STUDENT_SERIALS_TABLE || 'student_serials';
 const ADMIN_SERIALS_TABLE = process.env.ADMIN_SERIALS_TABLE || 'admin_serials';
-const MATH_RECORDS_TABLE = process.env.MATH_RECORDS_TABLE || 'math_records';
 
 let googleDriveIndexCache = {
   mtimeMs: -1,
@@ -96,7 +95,6 @@ function sanitizeSqlIdentifier(value) {
 
 const studentTable = sanitizeSqlIdentifier(STUDENT_SERIALS_TABLE);
 const adminTable = sanitizeSqlIdentifier(ADMIN_SERIALS_TABLE);
-const recordsTable = sanitizeSqlIdentifier(MATH_RECORDS_TABLE);
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -187,10 +185,6 @@ function normalizeAllowedMonths(value) {
     .filter((month) => /^M(1[0-2]|[1-9])$/.test(month));
 
   return MONTHS.filter((month) => normalized.includes(month));
-}
-
-function monthColumn(month) {
-  return `m${month.slice(1)}`;
 }
 
 function readCatalog() {
@@ -341,52 +335,6 @@ function mapAdminSerialRow(row) {
   };
 }
 
-async function getRecordsRows(client) {
-  const monthColumnsSql = MONTHS.map((month) => `"${monthColumn(month)}"`).join(', ');
-
-  try {
-    const withRecordNo = await client.query(
-      `SELECT record_no, ${monthColumnsSql}
-       FROM "${recordsTable}"
-       ORDER BY record_no ASC`,
-    );
-    return withRecordNo.rows.map((row, index) => ({
-      ...row,
-      record_no: Number(row.record_no) || index + 1,
-    }));
-  } catch (error) {
-    if (error?.code !== '42703') throw error;
-
-    const fallback = await client.query(
-      `SELECT ROW_NUMBER() OVER ()::int AS record_no, ${monthColumnsSql}
-       FROM "${recordsTable}"`,
-    );
-    return fallback.rows;
-  }
-}
-
-function normalizeRecordUrl(rawUrl) {
-  const value = String(rawUrl || '').trim();
-  if (!value) return '';
-
-  try {
-    const url = new URL(value);
-    if (!url.hostname.toLowerCase().includes('drive.google.com')) {
-      return value;
-    }
-
-    const fileMatch = url.pathname.match(/\/file\/d\/([^/]+)/i);
-    const fileId = fileMatch?.[1] || url.searchParams.get('id');
-    if (!fileId) {
-      return value;
-    }
-
-    return `https://drive.google.com/uc?export=download&id=${fileId}`;
-  } catch {
-    return value;
-  }
-}
-
 function normalizeMonthCode(value) {
   const normalized = String(value || '').trim().toUpperCase();
   return /^M(1[0-2]|[1-9])$/.test(normalized) ? normalized : '';
@@ -474,7 +422,6 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
   await ensureCatalogSessions(client, catalog);
   const sessionMap = await loadSessionMap(client);
   const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client);
-  const records = await getRecordsRows(client);
 
   const months = allowedMonths.map((month) => {
     const catalogVideos = catalog.videos
@@ -488,23 +435,7 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
         durationSec: Number.isFinite(video.durationSec) ? Number(video.durationSec) : null,
       }))
       .filter((video) => video.id);
-
-    const monthKey = monthColumn(month);
-    const fallbackVideos = records
-      .map((record) => {
-        const url = normalizeRecordUrl(record[monthKey]);
-        if (!url) return null;
-        return {
-          id: `${month}_${record.record_no}`,
-          title: `Record ${record.record_no}`,
-          month,
-          session: 'S1',
-          durationSec: null,
-        };
-      })
-      .filter(Boolean);
-
-    const videos = [...catalogVideos, ...fallbackVideos];
+    const videos = catalogVideos;
 
     const pdfs = catalog.pdfs
       .filter((pdf) => isStorageEntryPublished(googleDriveIndex, pdf?.storage))
@@ -2694,62 +2625,9 @@ app.get(/^\/pdf\/(.+)$/, authMiddleware, async (req, res) => {
 });
 
 app.get('/videos/:videoId/plain', authMiddleware, async (req, res) => {
-  const match = String(req.params.videoId || '').match(/^(M(1[0-2]|[1-9]))_(\d+)$/i);
-  if (!match) {
-    return res.status(400).json({ error: 'Invalid video id format' });
-  }
-
-  const month = match[1].toUpperCase();
-  const recordNo = Number(match[3]);
-
-  const client = await pool.connect();
-  try {
-    const authState = await getContentAccessFromToken(client, req.user);
-    if (authState.error) {
-      return res.status(authState.status || 401).json({ error: authState.error });
-    }
-
-    if (!authState.allowedMonths.includes(month)) {
-      return res.status(403).json({ error: `You are not subscribed to ${month}` });
-    }
-
-    const monthKey = monthColumn(month);
-    let row;
-
-    try {
-      const byRecordNo = await client.query(
-        `SELECT "${monthKey}" AS link
-         FROM "${recordsTable}"
-         WHERE record_no = $1
-         LIMIT 1`,
-        [recordNo],
-      );
-      row = byRecordNo.rows[0];
-    } catch (error) {
-      if (error?.code !== '42703') {
-        throw error;
-      }
-
-      const byOffset = await client.query(
-        `SELECT "${monthKey}" AS link
-         FROM "${recordsTable}"
-         OFFSET $1 LIMIT 1`,
-        [Math.max(0, recordNo - 1)],
-      );
-      row = byOffset.rows[0];
-    }
-
-    const link = normalizeRecordUrl(row?.link);
-    if (!link) {
-      return res.status(404).json({ error: 'Record link not found for this month/record' });
-    }
-
-    return res.redirect(302, link);
-  } catch (error) {
-    return res.status(500).json({ error: `Failed to get record link: ${error.message}` });
-  } finally {
-    client.release();
-  }
+  return res.status(410).json({
+    error: 'Legacy plain video records are no longer supported. Publish sessions through the catalog instead.',
+  });
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
