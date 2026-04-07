@@ -404,6 +404,7 @@ function normalizeSessionVideoMetadata(value) {
   const pageCount = Number(raw?.storage?.pageCount);
   const createdAtRaw = String(raw.createdAt || '').trim();
   const createdAtDate = createdAtRaw ? new Date(createdAtRaw) : new Date();
+  const googleDriveUrl = String(raw.google_drive_url || raw.googleDriveUrl || '').trim();
 
   if (!id || !wrappedKeyB64 || !wrapNonceB64) {
     return null;
@@ -426,6 +427,7 @@ function normalizeSessionVideoMetadata(value) {
       pageSize: Number.isFinite(pageSize) ? pageSize : null,
       pageCount: Number.isFinite(pageCount) ? pageCount : null,
     },
+    googleDriveUrl,
     createdAt: Number.isNaN(createdAtDate.getTime())
       ? new Date().toISOString()
       : createdAtDate.toISOString(),
@@ -450,19 +452,9 @@ function buildSessionVideoRecord(row) {
     durationSec: null,
     encryption: metadata.encryption,
     storage: metadata.storage,
+    googleDriveUrl: metadata.googleDriveUrl,
     createdAt: metadata.createdAt,
   };
-}
-
-function buildSessionVideoRelativePath(rowOrRecord) {
-  const month = normalizeMonthCode(rowOrRecord?.month_code || rowOrRecord?.month);
-  const session = normalizeSessionCode(rowOrRecord?.session_code || rowOrRecord?.session);
-  const metadata = normalizeSessionVideoMetadata(rowOrRecord?.video_metadata) || rowOrRecord;
-  const videoId = String(metadata?.id || '').trim();
-  if (!month || !session || !videoId) {
-    return '';
-  }
-  return `encrypted/${month}/${session}/${videoId}.enc`;
 }
 
 function buildSessionVideoContentUrl(videoId) {
@@ -510,19 +502,6 @@ async function findVideoSessionRowByVideoId(client, videoId) {
   };
 }
 
-function localEncryptedFileCandidates(relativePath) {
-  const normalized = normalizeRelativeStoragePath(relativePath);
-  if (!normalized) {
-    return [];
-  }
-
-  const repoRoot = path.join(__dirname, '..', '..');
-  return [
-    path.join(repoRoot, normalized),
-    path.join(dataDir, normalized),
-  ];
-}
-
 function normalizePendingEncryptedVideoRecord(value) {
   const raw = value && typeof value === 'object' ? value : null;
   if (!raw) {
@@ -535,6 +514,7 @@ function normalizePendingEncryptedVideoRecord(value) {
   const session = normalizeSessionCode(raw.session);
   const wrappedKeyB64 = String(raw?.encryption?.keyWrap?.wrappedKeyB64 || '').trim();
   const wrapNonceB64 = String(raw?.encryption?.keyWrap?.nonceB64 || '').trim();
+  const googleDriveUrl = String(raw.googleDriveUrl || raw.google_drive_url || '').trim();
   const totalPlainSize = Number(raw?.storage?.totalPlainSize);
   const pageSize = Number(raw?.storage?.pageSize);
   const pageCount = Number(raw?.storage?.pageCount);
@@ -553,6 +533,9 @@ function normalizePendingEncryptedVideoRecord(value) {
   if (!wrappedKeyB64 || !wrapNonceB64) {
     return { error: 'Encrypted video key-wrap metadata is missing' };
   }
+  if (!googleDriveUrl) {
+    return { error: 'Encrypted video Google Drive URL is required' };
+  }
 
   return {
     record: {
@@ -560,6 +543,7 @@ function normalizePendingEncryptedVideoRecord(value) {
       title,
       month,
       session,
+      googleDriveUrl,
       videoMetadata: {
         id,
         encryption: {
@@ -577,6 +561,7 @@ function normalizePendingEncryptedVideoRecord(value) {
           pageSize: Number.isFinite(pageSize) ? pageSize : null,
           pageCount: Number.isFinite(pageCount) ? pageCount : null,
         },
+        google_drive_url: googleDriveUrl,
         createdAt: Number.isNaN(createdAtDate.getTime())
           ? new Date().toISOString()
           : createdAtDate.toISOString(),
@@ -2263,6 +2248,7 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
         title: videoRecord.title,
         month: videoRecord.month,
         session: videoRecord.session,
+        googleDriveUrl: videoRecord.googleDriveUrl,
         catalogUpdated: true,
         catalogMessage: 'Session table updated successfully',
         googleDriveIndexUpdated: false,
@@ -2781,38 +2767,13 @@ app.get('/videos/:videoId/content', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: `You are not subscribed to ${month}` });
     }
 
-    const derivedRelativePath = buildSessionVideoRelativePath(sessionRow);
-    for (const candidatePath of localEncryptedFileCandidates(derivedRelativePath)) {
-      if (fs.existsSync(candidatePath)) {
-        return res.sendFile(candidatePath);
-      }
-    }
-
-    const catalog = readCatalog();
-    const legacyVideo = catalog.videos.find((entry) => String(entry?.id || '') === String(video.id || ''));
-    if (legacyVideo?.storage?.relativePath) {
-      const legacyRelativePath = normalizeRelativeStoragePath(legacyVideo.storage.relativePath);
-      for (const candidatePath of localEncryptedFileCandidates(legacyRelativePath)) {
-        if (fs.existsSync(candidatePath)) {
-          return res.sendFile(candidatePath);
-        }
-      }
-      const driveUrl = await resolveGoogleDriveUrl(legacyRelativePath, legacyVideo.storage);
-      if (driveUrl) {
-        return res.redirect(302, driveUrl);
-      }
-    }
-
-    const driveUrl = await resolveGoogleDriveUrl(
-      derivedRelativePath,
-      { relativePath: derivedRelativePath },
-    );
-    if (driveUrl) {
-      return res.redirect(302, driveUrl);
+    const directGoogleDriveUrl = normalizeGoogleDriveValue(video.googleDriveUrl);
+    if (directGoogleDriveUrl) {
+      return res.redirect(302, directGoogleDriveUrl);
     }
 
     return res.status(404).json({
-      error: `Encrypted content file for ${video.id} was not found locally or in Google Drive.`,
+      error: `Missing google_drive_url for session video ${video.id}.`,
     });
   } catch (error) {
     return res.status(500).json({ error: `Failed to resolve encrypted content URL: ${error.message}` });
