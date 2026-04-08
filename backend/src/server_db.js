@@ -1226,6 +1226,17 @@ async function uploadQuizQuestionImageViaAppsScript({
   if (!result || typeof result !== 'object') {
     throw new Error('Quiz Apps Script did not return a valid upload response');
   }
+  if (Array.isArray(result)) {
+    throw new Error('Quiz Apps Script returned a file list instead of an upload result. Ensure doPost returns { file: { id, fileName, questionNumber, imageUrl } }.');
+  }
+  if (result.error) {
+    throw new Error(String(result.error));
+  }
+  const file = result.file;
+  const fileId = String(file?.id || '').trim();
+  if (!file || !fileId) {
+    throw new Error(`Quiz Apps Script upload response is missing file.id. Response: ${JSON.stringify(result).slice(0, 280)}`);
+  }
 
   return result;
 }
