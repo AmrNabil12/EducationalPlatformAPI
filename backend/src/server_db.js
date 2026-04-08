@@ -42,7 +42,7 @@ function readEnvValueFromFile(key) {
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 const PORT = Number(process.env.PORT || 4000);
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
@@ -461,6 +461,10 @@ function buildSessionVideoContentUrl(videoId) {
   return `/videos/${encodeURIComponent(String(videoId || '').trim())}/content`;
 }
 
+function buildPdfSessionContentUrl(pdfId) {
+  return `/pdfs/${encodeURIComponent(String(pdfId || '').trim())}/content`;
+}
+
 async function loadVideoEnabledSessionRows(client) {
   const result = await client.query(
     `SELECT id, month_code, session_code, title, video_metadata
@@ -499,6 +503,82 @@ async function findVideoSessionRowByVideoId(client, videoId) {
   return {
     ...row,
     normalizedVideo,
+  };
+}
+
+function buildPdfSessionRecord(row) {
+  const id = String(row?.id || '').trim();
+  const month = normalizeMonthCode(row?.month_code);
+  const session = normalizeSessionCode(row?.session_code);
+  const title = normalizeName(row?.title);
+  const googleDriveUrl = normalizeGoogleDriveValue(row?.google_drive_url);
+
+  if (!id || !month || !session || !title || !googleDriveUrl) {
+    return null;
+  }
+
+  return {
+    id,
+    title,
+    month,
+    session,
+    downloadUrl: buildPdfSessionContentUrl(id),
+    googleDriveUrl,
+  };
+}
+
+async function loadPdfSessionRows(client) {
+  let result;
+  try {
+    result = await client.query(
+      `SELECT id, month_code, session_code, title, google_drive_url
+       FROM pdf_sessions`,
+    );
+  } catch (error) {
+    if (error?.code === '42P01') {
+      return [];
+    }
+    throw error;
+  }
+
+  return result.rows
+    .map((row) => ({
+      ...row,
+      normalizedPdf: buildPdfSessionRecord(row),
+    }))
+    .filter((row) => row.normalizedPdf);
+}
+
+async function findPdfSessionRowByPdfId(client, pdfId) {
+  let result;
+  try {
+    result = await client.query(
+      `SELECT id, month_code, session_code, title, google_drive_url
+       FROM pdf_sessions
+       WHERE id = $1
+       LIMIT 1`,
+      [String(pdfId || '').trim()],
+    );
+  } catch (error) {
+    if (error?.code === '42P01') {
+      return null;
+    }
+    throw error;
+  }
+
+  if (result.rowCount === 0) {
+    return null;
+  }
+
+  const row = result.rows[0];
+  const normalizedPdf = buildPdfSessionRecord(row);
+  if (!normalizedPdf) {
+    return null;
+  }
+
+  return {
+    ...row,
+    normalizedPdf,
   };
 }
 
@@ -570,6 +650,97 @@ function normalizePendingEncryptedVideoRecord(value) {
   };
 }
 
+function normalizePendingPdfRecord(value) {
+  const raw = value && typeof value === 'object' ? value : null;
+  if (!raw) {
+    return { error: 'pdf record is required' };
+  }
+
+  const id = String(raw.id || '').trim() || crypto.randomUUID();
+  const title = normalizeName(raw.title);
+  const month = normalizeMonthCode(raw.month);
+  const session = normalizeSessionCode(raw.session);
+  const googleDriveUrl = normalizeGoogleDriveValue(
+    raw.googleDriveUrl || raw.google_drive_url,
+  );
+  const createdAtRaw = String(raw.createdAt || '').trim();
+  const createdAtDate = createdAtRaw ? new Date(createdAtRaw) : new Date();
+
+  if (!title) {
+    return { error: 'PDF title is required' };
+  }
+  if (!month) {
+    return { error: 'PDF month must be in the form M1..M12' };
+  }
+  if (!session) {
+    return { error: 'PDF session must be in the form S1, S2, ...' };
+  }
+  if (!googleDriveUrl) {
+    return { error: 'PDF Google Drive URL is required' };
+  }
+
+  return {
+    record: {
+      id,
+      title,
+      month,
+      session,
+      googleDriveUrl,
+      createdAt: Number.isNaN(createdAtDate.getTime())
+        ? new Date().toISOString()
+        : createdAtDate.toISOString(),
+    },
+  };
+}
+
+function normalizeAdminQuizPayload(value) {
+  const raw = value && typeof value === 'object' ? value : null;
+  if (!raw) {
+    return { error: 'quiz payload is required' };
+  }
+
+  const month = normalizeMonthCode(raw.month);
+  const session = normalizeSessionCode(raw.session);
+  const driveFolderId = extractGoogleDriveId(raw.driveFolderUrl || raw.drive_folder_url || raw.driveFolderId || raw.drive_folder_id);
+  const questionCount = Number(raw.questionCount);
+
+  if (!month) {
+    return { error: 'Quiz month must be in the form M1..M12' };
+  }
+  if (!session) {
+    return { error: 'Quiz session must be in the form S1, S2, ...' };
+  }
+  if (!driveFolderId) {
+    return { error: 'Quiz Google Drive folder URL is invalid' };
+  }
+  if (!Number.isInteger(questionCount) || questionCount <= 0) {
+    return { error: 'Quiz question count must be a positive integer' };
+  }
+
+  let metadata;
+  try {
+    metadata = normalizeQuizMetadata(raw.metadata);
+  } catch (error) {
+    return { error: `Invalid quiz metadata: ${error.message}` };
+  }
+
+  if (metadata.length !== questionCount) {
+    return {
+      error: `Quiz metadata count (${metadata.length}) does not match questionCount (${questionCount})`,
+    };
+  }
+
+  return {
+    record: {
+      month,
+      session,
+      driveFolderId,
+      questionCount,
+      metadata,
+    },
+  };
+}
+
 async function getSessionById(client, sessionId) {
   const result = await client.query(
     `SELECT id, month_code, session_code, title
@@ -607,11 +778,11 @@ function extractMonthNumber(value) {
 
 async function buildAuthorizedMonthsPayload(client, allowedMonths) {
   const catalog = readCatalog();
-  const googleDriveIndex = loadGoogleDriveIndex();
   await ensureCatalogSessions(client, catalog);
   await syncLegacyCatalogVideosToSessions(client, catalog);
   const sessionMap = await loadSessionMap(client);
   const videoRows = await loadVideoEnabledSessionRows(client);
+  const pdfRows = await loadPdfSessionRows(client);
   const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client);
 
   const months = allowedMonths.map((month) => {
@@ -619,23 +790,9 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
       .filter((row) => normalizeMonthCode(row.month_code) === month)
       .map((row) => row.normalizedVideo);
 
-    const pdfs = catalog.pdfs
-      .filter((pdf) => isStorageEntryPublished(googleDriveIndex, pdf?.storage))
-      .filter((pdf) => String(pdf?.month || '').toUpperCase() === month)
-      .map((pdf) => {
-        const relativePath = String(pdf?.storage?.relativePath || '').replaceAll('\\', '/');
-        const downloadUrl = relativePath
-          ? `/pdf/${relativePath.split('/').map(encodeURIComponent).join('/')}`
-          : '';
-        return {
-          id: String(pdf.id || ''),
-          title: String(pdf.title || 'PDF'),
-          month,
-          session: String(pdf.session || 'S1').toUpperCase(),
-          downloadUrl,
-        };
-      })
-      .filter((pdf) => pdf.id && pdf.downloadUrl);
+    const pdfs = pdfRows
+      .filter((row) => normalizeMonthCode(row.month_code) === month)
+      .map((row) => row.normalizedPdf);
 
     const quizzes = Array.from(sessionMap.values())
       .filter((row) => normalizeMonthCode(row.month_code) === month)
@@ -1293,6 +1450,69 @@ function googleDriveApiGetJson(pathname, params = {}) {
   });
 }
 
+function googleDriveApiRequest(method, pathname, {
+  params = {},
+  headers = {},
+  body = null,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(pathname, 'https://www.googleapis.com');
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== '') {
+        url.searchParams.set(key, String(value));
+      }
+    }
+
+    if (GOOGLE_DRIVE_API_KEY) {
+      url.searchParams.set('key', GOOGLE_DRIVE_API_KEY);
+    }
+
+    const requestHeaders = { ...headers };
+    if (GOOGLE_DRIVE_ACCESS_TOKEN) {
+      requestHeaders.Authorization = `Bearer ${GOOGLE_DRIVE_ACCESS_TOKEN}`;
+    }
+    if (body && !requestHeaders['Content-Length'] && !requestHeaders['content-length']) {
+      requestHeaders['Content-Length'] = String(body.length);
+    }
+
+    const req = https.request(url, { method, headers: requestHeaders }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const rawBuffer = Buffer.concat(chunks);
+        const rawText = rawBuffer.toString('utf8');
+        let parsed = null;
+        try {
+          parsed = rawText ? JSON.parse(rawText) : null;
+        } catch {
+          parsed = null;
+        }
+
+        if (response.statusCode >= 400) {
+          const message = parsed?.error?.message
+            || rawText.trim()
+            || `Google Drive API request failed with status ${response.statusCode}`;
+          reject(new Error(message));
+          return;
+        }
+
+        resolve({
+          statusCode: response.statusCode,
+          bodyText: rawText,
+          bodyJson: parsed,
+          headers: response.headers,
+        });
+      });
+    });
+
+    req.on('error', reject);
+    if (body) {
+      req.write(body);
+    }
+    req.end();
+  });
+}
+
 async function googleDriveFindChild(parentId, childName, { folderOnly = false } = {}) {
   const cacheKey = `${parentId}|${folderOnly ? 'folder' : 'item'}|${childName}`;
   if (googleDriveChildrenCache.has(cacheKey)) {
@@ -1321,6 +1541,75 @@ async function googleDriveFindChild(parentId, childName, { folderOnly = false } 
   const match = files.find((file) => !folderOnly || file?.mimeType === 'application/vnd.google-apps.folder') || null;
   googleDriveChildrenCache.set(cacheKey, match);
   return match;
+}
+
+async function googleDriveListFolderFiles(parentId) {
+  const result = await googleDriveApiGetJson('/drive/v3/files', {
+    q: [
+      `'${escapeGoogleDriveQueryValue(parentId)}' in parents`,
+      'trashed = false',
+    ].join(' and '),
+    fields: 'files(id,name,mimeType)',
+    pageSize: 200,
+    includeItemsFromAllDrives: true,
+    supportsAllDrives: true,
+  });
+
+  return Array.isArray(result?.files) ? result.files : [];
+}
+
+async function googleDriveDeleteFile(fileId) {
+  await googleDriveApiRequest('DELETE', `/drive/v3/files/${encodeURIComponent(String(fileId || '').trim())}`, {
+    params: {
+      supportsAllDrives: true,
+    },
+  });
+}
+
+async function googleDriveUploadFile({
+  folderId,
+  fileName,
+  mimeType,
+  bytes,
+}) {
+  if (!GOOGLE_DRIVE_ACCESS_TOKEN) {
+    throw new Error('GOOGLE_DRIVE_ACCESS_TOKEN is required to upload quiz images to Drive');
+  }
+
+  const boundary = `educational-platform-${crypto.randomBytes(12).toString('hex')}`;
+  const metadataPart = Buffer.from(
+    JSON.stringify({
+      name: fileName,
+      parents: [folderId],
+    }),
+    'utf8',
+  );
+  const prefix = Buffer.from(
+    `--${boundary}\r\n`
+    + 'Content-Type: application/json; charset=UTF-8\r\n\r\n',
+    'utf8',
+  );
+  const middle = Buffer.from(
+    `\r\n--${boundary}\r\n`
+    + `Content-Type: ${mimeType}\r\n\r\n`,
+    'utf8',
+  );
+  const suffix = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  const body = Buffer.concat([prefix, metadataPart, middle, bytes, suffix]);
+
+  const response = await googleDriveApiRequest('POST', '/upload/drive/v3/files', {
+    params: {
+      uploadType: 'multipart',
+      supportsAllDrives: true,
+      fields: 'id,name,mimeType',
+    },
+    headers: {
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  return response.bodyJson || {};
 }
 
 async function resolveGoogleDriveUrlFromFolder(relativePath) {
@@ -2262,6 +2551,220 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
   }
 });
 
+app.post('/admin/pdfs', authMiddleware, async (req, res) => {
+  const normalized = normalizePendingPdfRecord(req.body?.pdf);
+  if (normalized.error) {
+    return res.status(400).json({ error: normalized.error });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const pdfRecord = normalized.record;
+
+    await client.query(
+      `INSERT INTO sessions (month_code, session_code, title)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (month_code, session_code) DO NOTHING`,
+      [pdfRecord.month, pdfRecord.session, `${pdfRecord.month} ${pdfRecord.session}`],
+    );
+
+    await client.query(
+      `INSERT INTO pdf_sessions (id, month_code, session_code, title, google_drive_url, created_at, updated_at)
+       VALUES ($1::uuid, $2, $3, $4, $5, $6::timestamptz, NOW())
+       ON CONFLICT (id)
+       DO UPDATE SET month_code = EXCLUDED.month_code,
+                     session_code = EXCLUDED.session_code,
+                     title = EXCLUDED.title,
+                     google_drive_url = EXCLUDED.google_drive_url,
+                     updated_at = NOW()`,
+      [
+        pdfRecord.id,
+        pdfRecord.month,
+        pdfRecord.session,
+        pdfRecord.title,
+        pdfRecord.googleDriveUrl,
+        pdfRecord.createdAt,
+      ],
+    );
+
+    return res.status(201).json({
+      message: 'PDF session saved successfully',
+      pdf: pdfRecord,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to add PDF record: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/quizzes/image', authMiddleware, async (req, res) => {
+  const driveFolderId = extractGoogleDriveId(req.body?.driveFolderUrl || req.body?.drive_folder_url || req.body?.driveFolderId);
+  const questionNumber = Number(req.body?.questionNumber);
+  const imageBase64 = String(req.body?.imageBase64 || '').trim();
+  const originalFileName = String(req.body?.originalFileName || '').trim();
+
+  if (!driveFolderId) {
+    return res.status(400).json({ error: 'A valid Google Drive folder URL is required' });
+  }
+  if (!Number.isInteger(questionNumber) || questionNumber <= 0) {
+    return res.status(400).json({ error: 'questionNumber must be a positive integer' });
+  }
+  if (!imageBase64) {
+    return res.status(400).json({ error: 'imageBase64 is required' });
+  }
+  if (!GOOGLE_DRIVE_ACCESS_TOKEN) {
+    return res.status(500).json({ error: 'GOOGLE_DRIVE_ACCESS_TOKEN is required to upload quiz images' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    let bytes;
+    try {
+      bytes = Buffer.from(imageBase64, 'base64');
+    } catch {
+      return res.status(400).json({ error: 'imageBase64 is not valid base64 data' });
+    }
+    if (!bytes.length) {
+      return res.status(400).json({ error: 'imageBase64 decoded to an empty file' });
+    }
+
+    const extMatch = originalFileName.toLowerCase().match(/\.(png|jpg|jpeg|webp)$/i);
+    const extension = extMatch?.[1]?.toLowerCase() || 'jpg';
+    const mimeType = extension === 'png'
+      ? 'image/png'
+      : extension === 'webp'
+        ? 'image/webp'
+        : 'image/jpeg';
+    const normalizedExtension = extension === 'jpeg' ? 'jpg' : extension;
+    const fileName = `${questionNumber}.${normalizedExtension}`;
+
+    const existingFiles = await googleDriveListFolderFiles(driveFolderId);
+    const duplicates = existingFiles.filter((file) => {
+      const numericName = Number.parseInt(String(file?.name || ''), 10);
+      return Number.isFinite(numericName) && numericName === questionNumber;
+    });
+    for (const duplicate of duplicates) {
+      if (duplicate?.id) {
+        await googleDriveDeleteFile(duplicate.id);
+      }
+    }
+
+    googleDriveChildrenCache.clear();
+    googleDrivePathUrlCache.clear();
+
+    const uploadedFile = await googleDriveUploadFile({
+      folderId: driveFolderId,
+      fileName,
+      mimeType,
+      bytes,
+    });
+
+    return res.status(201).json({
+      message: 'Quiz question image uploaded successfully',
+      file: {
+        id: String(uploadedFile?.id || ''),
+        fileName: String(uploadedFile?.name || fileName),
+        questionNumber,
+        imageUrl: createGoogleDriveViewUrl(String(uploadedFile?.id || '')),
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to upload quiz image: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/quizzes', authMiddleware, async (req, res) => {
+  const normalized = normalizeAdminQuizPayload(req.body?.quiz);
+  if (normalized.error) {
+    return res.status(400).json({ error: normalized.error });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const quizRecord = normalized.record;
+    const uploadedQuestionFiles = (await googleDriveListFolderFiles(quizRecord.driveFolderId))
+      .filter((file) => Number.isFinite(Number.parseInt(String(file?.name || ''), 10)));
+    if (uploadedQuestionFiles.length !== quizRecord.questionCount) {
+      return res.status(400).json({
+        error: `The Google Drive folder currently contains ${uploadedQuestionFiles.length} quiz image file(s), but questionCount is ${quizRecord.questionCount}. Upload every question image before finishing.`,
+      });
+    }
+
+    const sessionInsert = await client.query(
+      `INSERT INTO sessions (month_code, session_code, title)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (month_code, session_code)
+       DO UPDATE SET title = COALESCE(sessions.title, EXCLUDED.title)
+       RETURNING id, month_code, session_code`,
+      [quizRecord.month, quizRecord.session, `${quizRecord.month} ${quizRecord.session}`],
+    );
+
+    let sessionRow = sessionInsert.rows[0] || null;
+    if (!sessionRow) {
+      const existing = await client.query(
+        `SELECT id, month_code, session_code
+         FROM sessions
+         WHERE month_code = $1 AND session_code = $2
+         LIMIT 1`,
+        [quizRecord.month, quizRecord.session],
+      );
+      sessionRow = existing.rows[0] || null;
+    }
+    if (!sessionRow?.id) {
+      throw new Error('Could not resolve or create the target session row');
+    }
+
+    await client.query(
+      `INSERT INTO quiz_sessions (session_id, drive_folder_id, encrypted_metadata, question_count, updated_at)
+       VALUES ($1::uuid, $2, $3, $4, NOW())
+       ON CONFLICT (session_id)
+       DO UPDATE SET drive_folder_id = EXCLUDED.drive_folder_id,
+                     encrypted_metadata = EXCLUDED.encrypted_metadata,
+                     question_count = EXCLUDED.question_count,
+                     updated_at = NOW()`,
+      [
+        String(sessionRow.id),
+        quizRecord.driveFolderId,
+        JSON.stringify(quizRecord.metadata),
+        quizRecord.questionCount,
+      ],
+    );
+
+    return res.status(201).json({
+      message: 'Quiz session saved successfully',
+      quiz: {
+        sessionId: String(sessionRow.id),
+        month: quizRecord.month,
+        session: quizRecord.session,
+        driveFolderId: quizRecord.driveFolderId,
+        questionCount: quizRecord.questionCount,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to add quiz session: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/admin/google-drive-index', authMiddleware, async (req, res) => {
   const relativePath = normalizeRelativeStoragePath(req.body.relativePath);
   const rawGoogleDriveUrl = String(req.body.googleDriveUrl || '').trim();
@@ -2777,6 +3280,33 @@ app.get('/videos/:videoId/content', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: `Failed to resolve encrypted content URL: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/pdfs/:pdfId/content', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const authState = await getContentAccessFromToken(client, req.user);
+    if (authState.error) {
+      return res.status(authState.status || 401).json({ error: authState.error });
+    }
+
+    const pdfRow = await findPdfSessionRowByPdfId(client, req.params.pdfId);
+    if (!pdfRow) {
+      return res.status(404).json({ error: 'PDF not found' });
+    }
+
+    const pdf = pdfRow.normalizedPdf;
+    const month = String(pdf.month || '').toUpperCase();
+    if (!authState.allowedMonths.includes(month)) {
+      return res.status(403).json({ error: `You are not subscribed to ${month}` });
+    }
+
+    return res.redirect(302, pdf.googleDriveUrl);
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to resolve PDF URL: ${error.message}` });
   } finally {
     client.release();
   }
