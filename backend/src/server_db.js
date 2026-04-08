@@ -2820,13 +2820,14 @@ app.post('/admin/quizzes', authMiddleware, async (req, res) => {
       });
     }
 
+    const quizTitle = `${quizRecord.month}${quizRecord.session} Math Quiz`;
     const sessionInsert = await client.query(
       `INSERT INTO sessions (month_code, session_code, title)
        VALUES ($1, $2, $3)
        ON CONFLICT (month_code, session_code)
        DO UPDATE SET title = COALESCE(sessions.title, EXCLUDED.title)
        RETURNING id, month_code, session_code`,
-      [quizRecord.month, quizRecord.session, `${quizRecord.month} ${quizRecord.session}`],
+      [quizRecord.month, quizRecord.session, quizTitle],
     );
 
     let sessionRow = sessionInsert.rows[0] || null;
