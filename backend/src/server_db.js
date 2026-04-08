@@ -68,7 +68,11 @@ const GOOGLE_DRIVE_ROOT_FOLDER = String(
 ).trim();
 const GOOGLE_DRIVE_API_KEY = String(process.env.GOOGLE_DRIVE_API_KEY || '').trim();
 const GOOGLE_DRIVE_ACCESS_TOKEN = String(process.env.GOOGLE_DRIVE_ACCESS_TOKEN || '').trim();
-const QUIZ_APP_SCRIPT_URL = String(process.env.QUIZ_APP_SCRIPT_URL || '').trim();
+const QUIZ_APP_SCRIPT_URL = String(
+  process.env.QUIZ_APP_SCRIPT_URL
+  || 'https://script.google.com/macros/s/AKfycbyneLSkCmSLpcIYyb9HpSe4WAaJrc99NvkZMRT89GBIcfdP_YjcjNULu_YeFv1upX7RDA/exec',
+).trim();
+const QUIZ_APP_SCRIPT_SECRET = String(process.env.QUIZ_APP_SCRIPT_SECRET || '').trim();
 
 const STUDENT_SERIALS_TABLE = process.env.STUDENT_SERIALS_TABLE || 'student_serials';
 const ADMIN_SERIALS_TABLE = process.env.ADMIN_SERIALS_TABLE || 'admin_serials';
@@ -1072,6 +1076,87 @@ function httpsGetJsonByAbsoluteUrl(rawUrl, redirectCount = 0) {
   });
 }
 
+function httpsPostJsonByAbsoluteUrl(rawUrl, payload, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(rawUrl);
+    const body = Buffer.from(JSON.stringify(payload || {}), 'utf8');
+    const request = https.request(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Length': String(body.length),
+        },
+      },
+      (response) => {
+        let responseBody = '';
+        const contentType = String(response.headers['content-type'] || '').toLowerCase();
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => {
+          responseBody += chunk;
+        });
+        response.on('end', () => {
+          if (response.statusCode >= 300 && response.statusCode < 400) {
+            const location = String(response.headers.location || '').trim();
+            if (!location) {
+              reject(new Error(`Quiz Apps Script redirect (${response.statusCode}) did not include a location header`));
+              return;
+            }
+            if (redirectCount >= 5) {
+              reject(new Error('Quiz Apps Script redirected too many times'));
+              return;
+            }
+
+            const nextUrl = new URL(location, url).toString();
+            resolve(httpsPostJsonByAbsoluteUrl(nextUrl, payload, redirectCount + 1));
+            return;
+          }
+
+          const trimmedBody = String(responseBody || '').trim();
+          const normalizedBody = trimmedBody.replace(/^\)\]\}'\s*/, '');
+
+          if (!normalizedBody) {
+            resolve({});
+            return;
+          }
+
+          if (contentType.includes('text/html') || normalizedBody.startsWith('<!DOCTYPE html') || normalizedBody.startsWith('<html')) {
+            const snippet = normalizedBody.replace(/\s+/g, ' ').slice(0, 180);
+            reject(new Error(`Quiz Apps Script returned HTML instead of JSON. Check that QUIZ_APP_SCRIPT_URL is deployed as a public Web App. Response snippet: ${snippet}`));
+            return;
+          }
+
+          let parsed = null;
+          try {
+            parsed = JSON.parse(normalizedBody);
+          } catch {
+            const snippet = normalizedBody.replace(/\s+/g, ' ').slice(0, 180);
+            reject(new Error(`Invalid JSON returned from quiz Apps Script URL. Check the Apps Script response format. Response snippet: ${snippet}`));
+            return;
+          }
+
+          if (response.statusCode >= 400) {
+            reject(new Error(String(parsed?.error || `Quiz Apps Script request failed with status ${response.statusCode}`)));
+            return;
+          }
+
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.error) {
+            reject(new Error(String(parsed.error)));
+            return;
+          }
+
+          resolve(parsed);
+        });
+      },
+    );
+
+    request.on('error', reject);
+    request.write(body);
+    request.end();
+  });
+}
+
 async function fetchQuizFolderFiles(quizSessionConfig) {
   const baseUrl = String(QUIZ_APP_SCRIPT_URL || '').trim();
   const rawFolderValue = String(quizSessionConfig?.drive_folder_id || '').trim();
@@ -1103,6 +1188,39 @@ async function fetchQuizFolderFiles(quizSessionConfig) {
       if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
       return a.name.localeCompare(b.name);
     });
+}
+
+async function uploadQuizQuestionImageViaAppsScript({
+  driveFolderUrl,
+  driveFolderId,
+  questionNumber,
+  originalFileName,
+  imageBase64,
+}) {
+  const baseUrl = String(QUIZ_APP_SCRIPT_URL || '').trim();
+  if (!baseUrl) {
+    throw new Error('QUIZ_APP_SCRIPT_URL is required to upload quiz images');
+  }
+
+  const payload = {
+    action: 'uploadQuizImage',
+    folderId: String(driveFolderId || '').trim(),
+    driveFolderId: String(driveFolderId || '').trim(),
+    driveFolderUrl: String(driveFolderUrl || '').trim(),
+    questionNumber,
+    originalFileName: String(originalFileName || '').trim(),
+    imageBase64: String(imageBase64 || '').trim(),
+  };
+  if (QUIZ_APP_SCRIPT_SECRET) {
+    payload.secret = QUIZ_APP_SCRIPT_SECRET;
+  }
+
+  const result = await httpsPostJsonByAbsoluteUrl(baseUrl, payload);
+  if (!result || typeof result !== 'object') {
+    throw new Error('Quiz Apps Script did not return a valid upload response');
+  }
+
+  return result;
 }
 
 function encryptJsonForStudent(publicKeyPem, payload) {
@@ -2604,7 +2722,8 @@ app.post('/admin/pdfs', authMiddleware, async (req, res) => {
 });
 
 app.post('/admin/quizzes/image', authMiddleware, async (req, res) => {
-  const driveFolderId = extractGoogleDriveId(req.body?.driveFolderUrl || req.body?.drive_folder_url || req.body?.driveFolderId);
+  const driveFolderUrl = String(req.body?.driveFolderUrl || req.body?.drive_folder_url || '').trim();
+  const driveFolderId = extractGoogleDriveId(driveFolderUrl || req.body?.driveFolderId || req.body?.drive_folder_id);
   const questionNumber = Number(req.body?.questionNumber);
   const imageBase64 = String(req.body?.imageBase64 || '').trim();
   const originalFileName = String(req.body?.originalFileName || '').trim();
@@ -2617,9 +2736,6 @@ app.post('/admin/quizzes/image', authMiddleware, async (req, res) => {
   }
   if (!imageBase64) {
     return res.status(400).json({ error: 'imageBase64 is required' });
-  }
-  if (!GOOGLE_DRIVE_ACCESS_TOKEN) {
-    return res.status(500).json({ error: 'GOOGLE_DRIVE_ACCESS_TOKEN is required to upload quiz images' });
   }
 
   const client = await pool.connect();
@@ -2639,44 +2755,22 @@ app.post('/admin/quizzes/image', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'imageBase64 decoded to an empty file' });
     }
 
-    const extMatch = originalFileName.toLowerCase().match(/\.(png|jpg|jpeg|webp)$/i);
-    const extension = extMatch?.[1]?.toLowerCase() || 'jpg';
-    const mimeType = extension === 'png'
-      ? 'image/png'
-      : extension === 'webp'
-        ? 'image/webp'
-        : 'image/jpeg';
-    const normalizedExtension = extension === 'jpeg' ? 'jpg' : extension;
-    const fileName = `${questionNumber}.${normalizedExtension}`;
-
-    const existingFiles = await googleDriveListFolderFiles(driveFolderId);
-    const duplicates = existingFiles.filter((file) => {
-      const numericName = Number.parseInt(String(file?.name || ''), 10);
-      return Number.isFinite(numericName) && numericName === questionNumber;
+    const uploadResponse = await uploadQuizQuestionImageViaAppsScript({
+      driveFolderUrl,
+      driveFolderId,
+      questionNumber,
+      originalFileName,
+      imageBase64,
     });
-    for (const duplicate of duplicates) {
-      if (duplicate?.id) {
-        await googleDriveDeleteFile(duplicate.id);
-      }
-    }
-
-    googleDriveChildrenCache.clear();
-    googleDrivePathUrlCache.clear();
-
-    const uploadedFile = await googleDriveUploadFile({
-      folderId: driveFolderId,
-      fileName,
-      mimeType,
-      bytes,
-    });
+    const uploadedFile = uploadResponse?.file || {};
 
     return res.status(201).json({
-      message: 'Quiz question image uploaded successfully',
+      message: String(uploadResponse?.message || 'Quiz question image uploaded successfully'),
       file: {
         id: String(uploadedFile?.id || ''),
-        fileName: String(uploadedFile?.name || fileName),
+        fileName: String(uploadedFile?.fileName || uploadedFile?.name || ''),
         questionNumber,
-        imageUrl: createGoogleDriveViewUrl(String(uploadedFile?.id || '')),
+        imageUrl: String(uploadedFile?.imageUrl || createGoogleDriveViewUrl(String(uploadedFile?.id || ''))),
       },
     });
   } catch (error) {
@@ -2700,7 +2794,7 @@ app.post('/admin/quizzes', authMiddleware, async (req, res) => {
     }
 
     const quizRecord = normalized.record;
-    const uploadedQuestionFiles = (await googleDriveListFolderFiles(quizRecord.driveFolderId))
+    const uploadedQuestionFiles = (await fetchQuizFolderFiles({ drive_folder_id: quizRecord.driveFolderId }))
       .filter((file) => Number.isFinite(Number.parseInt(String(file?.name || ''), 10)));
     if (uploadedQuestionFiles.length !== quizRecord.questionCount) {
       return res.status(400).json({
