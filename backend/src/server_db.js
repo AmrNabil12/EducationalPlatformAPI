@@ -1166,10 +1166,10 @@ async function fetchQuizFolderFiles(quizSessionConfig) {
   }
 
   const url = new URL(baseUrl);
-  const host = url.hostname.toLowerCase();
-  if (host.includes('script.google.com')) {
-    url.searchParams.set('folderId', folderId);
-  }
+  // Always attach folder identifiers. This keeps listing working even if
+  // QUIZ_APP_SCRIPT_URL is configured as script.googleusercontent.com.
+  url.searchParams.set('folderId', folderId);
+  url.searchParams.set('driveFolderId', folderId);
   const fileList = await httpsGetJsonByAbsoluteUrl(url.toString());
   if (!Array.isArray(fileList)) {
     throw new Error('Quiz Apps Script did not return an array');
