@@ -1109,7 +1109,14 @@ function httpsPostJsonByAbsoluteUrl(rawUrl, payload, redirectCount = 0) {
             }
 
             const nextUrl = new URL(location, url).toString();
-            resolve(httpsPostJsonByAbsoluteUrl(nextUrl, payload, redirectCount + 1));
+            // Apps Script often responds to POST /exec with a 302 to a
+            // script.googleusercontent.com endpoint that should be followed
+            // as GET. Preserve POST only for 307/308.
+            if (response.statusCode === 307 || response.statusCode === 308) {
+              resolve(httpsPostJsonByAbsoluteUrl(nextUrl, payload, redirectCount + 1));
+              return;
+            }
+            resolve(httpsGetJsonByAbsoluteUrl(nextUrl, redirectCount + 1));
             return;
           }
 
@@ -1123,7 +1130,7 @@ function httpsPostJsonByAbsoluteUrl(rawUrl, payload, redirectCount = 0) {
 
           if (contentType.includes('text/html') || normalizedBody.startsWith('<!DOCTYPE html') || normalizedBody.startsWith('<html')) {
             const snippet = normalizedBody.replace(/\s+/g, ' ').slice(0, 180);
-            reject(new Error(`Quiz Apps Script returned HTML instead of JSON. Check that QUIZ_APP_SCRIPT_URL is deployed as a public Web App. Response snippet: ${snippet}`));
+            reject(new Error(`Quiz Apps Script returned HTML instead of JSON (status ${response.statusCode}, host ${url.hostname}). Ensure Web App access is "Anyone" and the /exec URL is current. Response snippet: ${snippet}`));
             return;
           }
 
