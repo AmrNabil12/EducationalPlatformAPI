@@ -49,25 +49,11 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const MASTER_KEY_B64 = String(process.env.MASTER_KEY_B64 || '').trim();
 
-const dataDir = path.join(__dirname, '..', 'data');
-const catalogPath = path.join(dataDir, 'catalog.json');
-
 const DATABASE_URL = (process.env.DATABASE_URL || readEnvValueFromFile('DATABASE_URL') || '').trim();
 const DATABASE_SSL = String(process.env.DATABASE_SSL || 'false').toLowerCase() === 'true';
-const GOOGLE_DRIVE_INDEX_PATH = process.env.GOOGLE_DRIVE_INDEX_PATH
-  ? path.resolve(process.env.GOOGLE_DRIVE_INDEX_PATH)
-  : path.join(dataDir, 'google_drive_index.json');
 const GOOGLE_DRIVE_URL_STYLE = String(process.env.GOOGLE_DRIVE_URL_STYLE || 'usercontent')
   .trim()
   .toLowerCase();
-const GOOGLE_DRIVE_ROOT_FOLDER = String(
-  process.env.GOOGLE_DRIVE_ROOT_FOLDER
-  || process.env.GOOGLE_DRIVE_FOLDER_URL
-  || process.env.GOOGLE_DRIVE_FOLDER_ID
-  || '',
-).trim();
-const GOOGLE_DRIVE_API_KEY = String(process.env.GOOGLE_DRIVE_API_KEY || '').trim();
-const GOOGLE_DRIVE_ACCESS_TOKEN = String(process.env.GOOGLE_DRIVE_ACCESS_TOKEN || '').trim();
 const QUIZ_APP_SCRIPT_URL = String(
   process.env.QUIZ_APP_SCRIPT_URL
   || 'https://script.google.com/macros/s/AKfycbyneLSkCmSLpcIYyb9HpSe4WAaJrc99NvkZMRT89GBIcfdP_YjcjNULu_YeFv1upX7RDA/exec',
@@ -76,13 +62,6 @@ const QUIZ_APP_SCRIPT_SECRET = String(process.env.QUIZ_APP_SCRIPT_SECRET || '').
 
 const STUDENT_SERIALS_TABLE = process.env.STUDENT_SERIALS_TABLE || 'student_serials';
 const ADMIN_SERIALS_TABLE = process.env.ADMIN_SERIALS_TABLE || 'admin_serials';
-
-let googleDriveIndexCache = {
-  mtimeMs: -1,
-  value: {},
-};
-const googleDriveChildrenCache = new Map();
-const googleDrivePathUrlCache = new Map();
 
 if (!DATABASE_URL) {
   console.error(`Missing DATABASE_URL. Configure remote database connection in ${ENV_PATH}`);
@@ -189,55 +168,6 @@ function normalizeAllowedMonths(value) {
     .filter((month) => /^M(1[0-2]|[1-9])$/.test(month));
 
   return MONTHS.filter((month) => normalized.includes(month));
-}
-
-function readCatalog() {
-  try {
-    const raw = fs.readFileSync(catalogPath, 'utf8');
-    const decoded = JSON.parse(raw);
-    return {
-      videos: Array.isArray(decoded?.videos) ? decoded.videos : [],
-      pdfs:   Array.isArray(decoded?.pdfs)   ? decoded.pdfs   : [],
-    };
-  } catch {
-    return { videos: [], pdfs: [] };
-  }
-}
-
-function writeCatalog(catalog) {
-  fs.mkdirSync(path.dirname(catalogPath), { recursive: true });
-  fs.writeFileSync(
-    catalogPath,
-    `${JSON.stringify({
-      generatedAt: new Date().toISOString(),
-      videos: Array.isArray(catalog?.videos) ? catalog.videos : [],
-      pdfs: Array.isArray(catalog?.pdfs) ? catalog.pdfs : [],
-    }, null, 2)}\n`,
-    'utf8',
-  );
-}
-
-function buildChunkManifest(video) {
-  const chunks = Array.isArray(video?.storage?.chunks) ? video.storage.chunks : [];
-  return chunks.map((chunk, index) => {
-    const relativePath = String(chunk?.relativePath || '').replaceAll('\\', '/');
-    const fileName = path.basename(String(chunk?.fileName || relativePath || ''));
-    return {
-      index: Number(chunk?.index) || index,
-      fileName,
-      url: `/storage/${relativePath.split('/').map(encodeURIComponent).join('/')}`,
-      nonceB64: String(chunk?.nonceB64 || ''),
-      plainSize: Number(chunk?.plainSize) || 0,
-      encryptedSize: Number(chunk?.encryptedSize) || 0,
-      relativePath,
-    };
-  }).filter((chunk) => chunk.relativePath || chunk.fileName);
-}
-
-function buildPagedContentUrl(video) {
-  const relativePath = String(video?.storage?.relativePath || '').replaceAll('\\', '/');
-  if (!relativePath) return '';
-  return `/storage/${relativePath.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 function aesGcmDecrypt(key, nonceB64, encryptedB64) {
@@ -347,26 +277,6 @@ function normalizeMonthCode(value) {
 function normalizeSessionCode(value) {
   const normalized = String(value || '').trim().toUpperCase();
   return /^S\d+$/.test(normalized) ? normalized : '';
-}
-
-async function ensureCatalogSessions(client, catalog) {
-  const pairs = new Map();
-
-  for (const entry of [...(catalog?.videos || []), ...(catalog?.pdfs || [])]) {
-    const month = normalizeMonthCode(entry?.month);
-    const session = normalizeSessionCode(entry?.session);
-    if (!month || !session) continue;
-    pairs.set(`${month}:${session}`, { month, session });
-  }
-
-  for (const pair of pairs.values()) {
-    await client.query(
-      `INSERT INTO sessions (month_code, session_code, title)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (month_code, session_code) DO NOTHING`,
-      [pair.month, pair.session, `${pair.month} ${pair.session}`],
-    );
-  }
 }
 
 async function loadSessionMap(client) {
@@ -781,9 +691,6 @@ function extractMonthNumber(value) {
 }
 
 async function buildAuthorizedMonthsPayload(client, allowedMonths) {
-  const catalog = readCatalog();
-  await ensureCatalogSessions(client, catalog);
-  await syncLegacyCatalogVideosToSessions(client, catalog);
   const sessionMap = await loadSessionMap(client);
   const videoRows = await loadVideoEnabledSessionRows(client);
   const pdfRows = await loadPdfSessionRows(client);
@@ -1532,483 +1439,8 @@ function extractGoogleDriveId(rawValue) {
   }
 }
 
-function escapeGoogleDriveQueryValue(value) {
-  return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-}
-
-function hasGoogleDriveDynamicLookupConfig() {
-  return Boolean(extractGoogleDriveId(GOOGLE_DRIVE_ROOT_FOLDER) && (GOOGLE_DRIVE_API_KEY || GOOGLE_DRIVE_ACCESS_TOKEN));
-}
-
-function googleDriveApiGetJson(pathname, params = {}) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(pathname, 'https://www.googleapis.com');
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== null && value !== '') {
-        url.searchParams.set(key, String(value));
-      }
-    }
-
-    if (GOOGLE_DRIVE_API_KEY) {
-      url.searchParams.set('key', GOOGLE_DRIVE_API_KEY);
-    }
-
-    const headers = {};
-    if (GOOGLE_DRIVE_ACCESS_TOKEN) {
-      headers.Authorization = `Bearer ${GOOGLE_DRIVE_ACCESS_TOKEN}`;
-    }
-
-    const req = https.get(url, { headers }, (response) => {
-      let raw = '';
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => {
-        raw += chunk;
-      });
-      response.on('end', () => {
-        let parsed = {};
-        try {
-          parsed = raw ? JSON.parse(raw) : {};
-        } catch {
-          parsed = {};
-        }
-
-        if (response.statusCode >= 400) {
-          const message = parsed?.error?.message || `Google Drive API request failed with status ${response.statusCode}`;
-          reject(new Error(message));
-          return;
-        }
-
-        resolve(parsed);
-      });
-    });
-
-    req.on('error', reject);
-  });
-}
-
-function googleDriveApiRequest(method, pathname, {
-  params = {},
-  headers = {},
-  body = null,
-} = {}) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(pathname, 'https://www.googleapis.com');
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== null && value !== '') {
-        url.searchParams.set(key, String(value));
-      }
-    }
-
-    if (GOOGLE_DRIVE_API_KEY) {
-      url.searchParams.set('key', GOOGLE_DRIVE_API_KEY);
-    }
-
-    const requestHeaders = { ...headers };
-    if (GOOGLE_DRIVE_ACCESS_TOKEN) {
-      requestHeaders.Authorization = `Bearer ${GOOGLE_DRIVE_ACCESS_TOKEN}`;
-    }
-    if (body && !requestHeaders['Content-Length'] && !requestHeaders['content-length']) {
-      requestHeaders['Content-Length'] = String(body.length);
-    }
-
-    const req = https.request(url, { method, headers: requestHeaders }, (response) => {
-      const chunks = [];
-      response.on('data', (chunk) => chunks.push(chunk));
-      response.on('end', () => {
-        const rawBuffer = Buffer.concat(chunks);
-        const rawText = rawBuffer.toString('utf8');
-        let parsed = null;
-        try {
-          parsed = rawText ? JSON.parse(rawText) : null;
-        } catch {
-          parsed = null;
-        }
-
-        if (response.statusCode >= 400) {
-          const message = parsed?.error?.message
-            || rawText.trim()
-            || `Google Drive API request failed with status ${response.statusCode}`;
-          reject(new Error(message));
-          return;
-        }
-
-        resolve({
-          statusCode: response.statusCode,
-          bodyText: rawText,
-          bodyJson: parsed,
-          headers: response.headers,
-        });
-      });
-    });
-
-    req.on('error', reject);
-    if (body) {
-      req.write(body);
-    }
-    req.end();
-  });
-}
-
-async function googleDriveFindChild(parentId, childName, { folderOnly = false } = {}) {
-  const cacheKey = `${parentId}|${folderOnly ? 'folder' : 'item'}|${childName}`;
-  if (googleDriveChildrenCache.has(cacheKey)) {
-    return googleDriveChildrenCache.get(cacheKey);
-  }
-
-  const filters = [
-    `'${escapeGoogleDriveQueryValue(parentId)}' in parents`,
-    `name = '${escapeGoogleDriveQueryValue(childName)}'`,
-    'trashed = false',
-  ];
-
-  if (folderOnly) {
-    filters.push("mimeType = 'application/vnd.google-apps.folder'");
-  }
-
-  const result = await googleDriveApiGetJson('/drive/v3/files', {
-    q: filters.join(' and '),
-    fields: 'files(id,name,mimeType)',
-    pageSize: 10,
-    includeItemsFromAllDrives: true,
-    supportsAllDrives: true,
-  });
-
-  const files = Array.isArray(result?.files) ? result.files : [];
-  const match = files.find((file) => !folderOnly || file?.mimeType === 'application/vnd.google-apps.folder') || null;
-  googleDriveChildrenCache.set(cacheKey, match);
-  return match;
-}
-
-async function googleDriveListFolderFiles(parentId) {
-  const result = await googleDriveApiGetJson('/drive/v3/files', {
-    q: [
-      `'${escapeGoogleDriveQueryValue(parentId)}' in parents`,
-      'trashed = false',
-    ].join(' and '),
-    fields: 'files(id,name,mimeType)',
-    pageSize: 200,
-    includeItemsFromAllDrives: true,
-    supportsAllDrives: true,
-  });
-
-  return Array.isArray(result?.files) ? result.files : [];
-}
-
-async function googleDriveDeleteFile(fileId) {
-  await googleDriveApiRequest('DELETE', `/drive/v3/files/${encodeURIComponent(String(fileId || '').trim())}`, {
-    params: {
-      supportsAllDrives: true,
-    },
-  });
-}
-
-async function googleDriveUploadFile({
-  folderId,
-  fileName,
-  mimeType,
-  bytes,
-}) {
-  if (!GOOGLE_DRIVE_ACCESS_TOKEN) {
-    throw new Error('GOOGLE_DRIVE_ACCESS_TOKEN is required to upload quiz images to Drive');
-  }
-
-  const boundary = `educational-platform-${crypto.randomBytes(12).toString('hex')}`;
-  const metadataPart = Buffer.from(
-    JSON.stringify({
-      name: fileName,
-      parents: [folderId],
-    }),
-    'utf8',
-  );
-  const prefix = Buffer.from(
-    `--${boundary}\r\n`
-    + 'Content-Type: application/json; charset=UTF-8\r\n\r\n',
-    'utf8',
-  );
-  const middle = Buffer.from(
-    `\r\n--${boundary}\r\n`
-    + `Content-Type: ${mimeType}\r\n\r\n`,
-    'utf8',
-  );
-  const suffix = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
-  const body = Buffer.concat([prefix, metadataPart, middle, bytes, suffix]);
-
-  const response = await googleDriveApiRequest('POST', '/upload/drive/v3/files', {
-    params: {
-      uploadType: 'multipart',
-      supportsAllDrives: true,
-      fields: 'id,name,mimeType',
-    },
-    headers: {
-      'Content-Type': `multipart/related; boundary=${boundary}`,
-    },
-    body,
-  });
-
-  return response.bodyJson || {};
-}
-
-async function resolveGoogleDriveUrlFromFolder(relativePath) {
-  if (!hasGoogleDriveDynamicLookupConfig()) {
-    return '';
-  }
-
-  const normalizedRelativePath = normalizeRelativeStoragePath(relativePath);
-  if (!normalizedRelativePath) return '';
-
-  if (googleDrivePathUrlCache.has(normalizedRelativePath)) {
-    return googleDrivePathUrlCache.get(normalizedRelativePath);
-  }
-
-  const rootFolderId = extractGoogleDriveId(GOOGLE_DRIVE_ROOT_FOLDER);
-  const parts = normalizedRelativePath.split('/').filter(Boolean);
-  const candidatePartLists = [parts];
-  if (parts[0]?.toLowerCase() === 'encrypted') {
-    candidatePartLists.push(parts.slice(1));
-  }
-
-  for (const candidateParts of candidatePartLists) {
-    if (candidateParts.length === 0) continue;
-
-    let currentParentId = rootFolderId;
-    let failed = false;
-
-    for (let i = 0; i < candidateParts.length - 1; i += 1) {
-      const folder = await googleDriveFindChild(currentParentId, candidateParts[i], { folderOnly: true });
-      if (!folder?.id) {
-        failed = true;
-        break;
-      }
-      currentParentId = folder.id;
-    }
-
-    if (failed) {
-      continue;
-    }
-
-    const file = await googleDriveFindChild(currentParentId, candidateParts[candidateParts.length - 1]);
-    if (file?.id) {
-      const url = createGoogleDriveDownloadUrl(file.id);
-      googleDrivePathUrlCache.set(normalizedRelativePath, url);
-      return url;
-    }
-  }
-
-  googleDrivePathUrlCache.set(normalizedRelativePath, '');
-  return '';
-}
-
-function loadGoogleDriveIndex() {
-  try {
-    const stats = fs.statSync(GOOGLE_DRIVE_INDEX_PATH);
-    if (googleDriveIndexCache.mtimeMs === stats.mtimeMs) {
-      return googleDriveIndexCache.value;
-    }
-
-    const raw = fs.readFileSync(GOOGLE_DRIVE_INDEX_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    const value = parsed && typeof parsed === 'object' ? parsed : {};
-
-    googleDriveIndexCache = {
-      mtimeMs: stats.mtimeMs,
-      value,
-    };
-
-    return value;
-  } catch {
-    googleDriveIndexCache = {
-      mtimeMs: -1,
-      value: {},
-    };
-    return {};
-  }
-}
-
-async function syncLegacyCatalogVideosToSessions(client, catalog) {
-  for (const video of catalog?.videos || []) {
-    const normalized = normalizeEncryptedVideoCatalogRecord(video);
-    if (normalized.error) {
-      continue;
-    }
-
-    const record = normalized.record;
-    const videoMetadata = {
-      id: record.id,
-      encryption: record.encryption,
-      storage: {
-        mode: String(record?.storage?.mode || 'paged').trim().toLowerCase() || 'paged',
-        totalPlainSize: Number(record?.storage?.totalPlainSize) || null,
-        pageSize: Number(record?.storage?.pageSize) || null,
-        pageCount: Number(record?.storage?.pageCount) || null,
-      },
-      createdAt: String(record.createdAt || '').trim() || new Date().toISOString(),
-    };
-
-    await client.query(
-      `INSERT INTO sessions (month_code, session_code, title, video_metadata)
-       VALUES ($1, $2, $3, $4::jsonb)
-       ON CONFLICT (month_code, session_code)
-       DO UPDATE SET title = COALESCE(NULLIF(EXCLUDED.title, ''), sessions.title),
-                     video_metadata = COALESCE(sessions.video_metadata, EXCLUDED.video_metadata)`,
-      [
-        record.month,
-        record.session,
-        record.title,
-        JSON.stringify(videoMetadata),
-      ],
-    );
-  }
-}
-
-function saveGoogleDriveIndex(index) {
-  fs.mkdirSync(path.dirname(GOOGLE_DRIVE_INDEX_PATH), { recursive: true });
-  fs.writeFileSync(
-    GOOGLE_DRIVE_INDEX_PATH,
-    `${JSON.stringify(index && typeof index === 'object' ? index : {}, null, 2)}\n`,
-    'utf8',
-  );
-
-  googleDriveIndexCache = {
-    mtimeMs: -1,
-    value: index && typeof index === 'object' ? index : {},
-  };
-  googleDrivePathUrlCache.clear();
-}
-
 function normalizeRelativeStoragePath(value) {
   return String(value || '').replaceAll('\\', '/').replace(/^\/+/, '');
-}
-
-function resolveGoogleDriveIndexEntry(index, relativePath) {
-  const normalizedRelativePath = normalizeRelativeStoragePath(relativePath);
-  const withoutEncryptedPrefix = normalizedRelativePath.replace(/^encrypted\//i, '');
-
-  const candidateKeys = [
-    normalizedRelativePath,
-    withoutEncryptedPrefix,
-    `/${normalizedRelativePath}`,
-    `/${withoutEncryptedPrefix}`,
-  ];
-
-  for (const key of candidateKeys) {
-    if (key && Object.prototype.hasOwnProperty.call(index, key)) {
-      return index[key];
-    }
-  }
-
-  return null;
-}
-
-function hasPublishedGoogleDriveTarget(storageEntry) {
-  const directCandidates = [
-    storageEntry?.googleDriveUrl,
-    storageEntry?.driveUrl,
-    storageEntry?.downloadUrl,
-    storageEntry?.publicUrl,
-    storageEntry?.googleDriveFileId,
-    storageEntry?.driveFileId,
-    storageEntry?.fileId,
-  ];
-
-  return directCandidates.some((candidate) => Boolean(normalizeGoogleDriveValue(candidate)));
-}
-
-function isStorageEntryPublished(index, storageEntry) {
-  if (!storageEntry || typeof storageEntry !== 'object') {
-    return false;
-  }
-
-  if (hasPublishedGoogleDriveTarget(storageEntry)) {
-    return true;
-  }
-
-  const relativePath = normalizeRelativeStoragePath(storageEntry.relativePath);
-  if (!relativePath) {
-    return false;
-  }
-
-  return Boolean(resolveGoogleDriveIndexEntry(index, relativePath));
-}
-
-function isCatalogVideoPublished(index, video) {
-  const storage = video?.storage || {};
-  if (isStorageEntryPublished(index, storage)) {
-    return true;
-  }
-
-  const chunks = Array.isArray(storage?.chunks) ? storage.chunks : [];
-  return chunks.some((chunk) => isStorageEntryPublished(index, chunk));
-}
-
-async function resolveGoogleDriveUrl(relativePath, storageEntry) {
-  const directCandidates = [
-    storageEntry?.googleDriveUrl,
-    storageEntry?.driveUrl,
-    storageEntry?.downloadUrl,
-    storageEntry?.publicUrl,
-    storageEntry?.googleDriveFileId,
-    storageEntry?.driveFileId,
-    storageEntry?.fileId,
-  ];
-
-  for (const candidate of directCandidates) {
-    const normalized = normalizeGoogleDriveValue(candidate);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  const index = loadGoogleDriveIndex();
-  const mappedEntry = resolveGoogleDriveIndexEntry(index, relativePath);
-  if (typeof mappedEntry === 'string') {
-    const normalized = normalizeGoogleDriveValue(mappedEntry);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  if (mappedEntry && typeof mappedEntry === 'object') {
-    const mappedCandidates = [
-      mappedEntry.googleDriveUrl,
-      mappedEntry.driveUrl,
-      mappedEntry.downloadUrl,
-      mappedEntry.publicUrl,
-      mappedEntry.googleDriveFileId,
-      mappedEntry.driveFileId,
-      mappedEntry.fileId,
-    ];
-
-    for (const candidate of mappedCandidates) {
-      const normalized = normalizeGoogleDriveValue(candidate);
-      if (normalized) {
-        return normalized;
-      }
-    }
-  }
-
-  return resolveGoogleDriveUrlFromFolder(relativePath);
-}
-
-function findCatalogStorageMatch(catalogVideos, relativePath) {
-  const normalizedRelativePath = normalizeRelativeStoragePath(relativePath);
-
-  for (const video of catalogVideos) {
-    const storage = video?.storage || {};
-    const singleRelativePath = normalizeRelativeStoragePath(storage.relativePath);
-    if (singleRelativePath && singleRelativePath === normalizedRelativePath) {
-      return { video, storageEntry: storage };
-    }
-
-    const chunks = Array.isArray(storage.chunks) ? storage.chunks : [];
-    for (const chunk of chunks) {
-      const chunkRelativePath = normalizeRelativeStoragePath(chunk?.relativePath);
-      if (chunkRelativePath && chunkRelativePath === normalizedRelativePath) {
-        return { video, storageEntry: chunk };
-      }
-    }
-  }
-
-  return null;
 }
 
 function sanitizeStorageName(value) {
@@ -2878,42 +2310,10 @@ app.post('/admin/quizzes', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/admin/google-drive-index', authMiddleware, async (req, res) => {
-  const relativePath = normalizeRelativeStoragePath(req.body.relativePath);
-  const rawGoogleDriveUrl = String(req.body.googleDriveUrl || '').trim();
-
-  if (!relativePath) {
-    return res.status(400).json({ error: 'relativePath is required' });
-  }
-  if (!rawGoogleDriveUrl) {
-    return res.status(400).json({ error: 'googleDriveUrl is required' });
-  }
-
-  const client = await pool.connect();
-  try {
-    const adminState = await getAdminFromToken(client, req.user);
-    if (adminState.error) {
-      return res.status(adminState.status || 403).json({ error: adminState.error });
-    }
-
-    const index = loadGoogleDriveIndex();
-    index[relativePath] = rawGoogleDriveUrl;
-    saveGoogleDriveIndex(index);
-
-    return res.status(200).json({
-      message: 'Remote Google Drive index updated successfully',
-      entry: {
-        relativePath,
-        googleDriveUrl: rawGoogleDriveUrl,
-        googleDriveIndexUpdated: true,
-        googleDriveIndexMessage: 'Remote Google Drive index updated successfully',
-      },
-    });
-  } catch (error) {
-    return res.status(500).json({ error: `Failed to update Google Drive index: ${error.message}` });
-  } finally {
-    client.release();
-  }
+app.post('/admin/google-drive-index', authMiddleware, (req, res) => {
+  return res.status(410).json({
+    error: 'Deprecated endpoint. Use DB-backed /admin/videos and /admin/pdfs with googleDriveUrl.',
+  });
 });
 
 app.post('/admin/encrypted-videos/catalog', authMiddleware, async (req, res) => {
@@ -2930,40 +2330,38 @@ app.post('/admin/encrypted-videos/catalog', authMiddleware, async (req, res) => 
     }
 
     const videoRecord = normalized.record;
+    const videoMetadata = {
+      id: videoRecord.id,
+      encryption: videoRecord.encryption,
+      storage: {
+        mode: String(videoRecord?.storage?.mode || 'paged').trim().toLowerCase() || 'paged',
+        totalPlainSize: Number(videoRecord?.storage?.totalPlainSize) || null,
+        pageSize: Number(videoRecord?.storage?.pageSize) || null,
+        pageCount: Number(videoRecord?.storage?.pageCount) || null,
+      },
+      createdAt: String(videoRecord.createdAt || '').trim() || new Date().toISOString(),
+    };
+
     await client.query(
-      `INSERT INTO sessions (month_code, session_code, title)
-       VALUES ($1, $2, $3)
+      `INSERT INTO sessions (month_code, session_code, title, video_metadata)
+       VALUES ($1, $2, $3, $4::jsonb)
        ON CONFLICT (month_code, session_code)
-       DO UPDATE SET title = EXCLUDED.title`,
-      [videoRecord.month, videoRecord.session, videoRecord.title],
+       DO UPDATE SET title = COALESCE(NULLIF(EXCLUDED.title, ''), sessions.title),
+                     video_metadata = COALESCE(sessions.video_metadata, '{}'::jsonb) || EXCLUDED.video_metadata`,
+      [
+        videoRecord.month,
+        videoRecord.session,
+        videoRecord.title,
+        JSON.stringify(videoMetadata),
+      ],
     );
 
-    const catalog = readCatalog();
-    const existingIndex = catalog.videos.findIndex((entry) => {
-      const entryId = String(entry?.id || '').trim();
-      const entryRelativePath = normalizeEncryptedCatalogRelativePath(
-        entry?.storage?.relativePath,
-      );
-      return entryId === videoRecord.id || entryRelativePath === videoRecord.storage.relativePath;
-    });
-
-    if (existingIndex >= 0) {
-      catalog.videos[existingIndex] = {
-        ...catalog.videos[existingIndex],
-        ...videoRecord,
-      };
-    } else {
-      catalog.videos.push(videoRecord);
-    }
-
-    writeCatalog(catalog);
-
-    return res.status(existingIndex >= 0 ? 200 : 201).json({
-      message: 'Encrypted video record synced to remote catalog successfully',
+    return res.status(201).json({
+      message: 'Encrypted video metadata synced to sessions table successfully',
       video: videoRecord,
     });
   } catch (error) {
-    return res.status(500).json({ error: `Failed to sync encrypted video catalog: ${error.message}` });
+    return res.status(500).json({ error: `Failed to sync encrypted video metadata: ${error.message}` });
   } finally {
     client.release();
   }
@@ -3425,88 +2823,21 @@ app.get('/pdfs/:pdfId/content', authMiddleware, async (req, res) => {
   }
 });
 
-app.get(/^\/storage\/(.+)$/, authMiddleware, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const authState = await getContentAccessFromToken(client, req.user);
-    if (authState.error) {
-      return res.status(authState.status || 401).json({ error: authState.error });
-    }
-
-    const requestedRelativePath = decodeURIComponent(String(req.params[0] || ''));
-    const normalizedRelativePath = normalizeRelativeStoragePath(requestedRelativePath);
-
-    const catalog = readCatalog();
-    const matched = findCatalogStorageMatch(catalog.videos, normalizedRelativePath);
-
-    if (!matched) {
-      return res.status(404).json({ error: 'Video metadata not found' });
-    }
-
-    const month = String(matched.video.month || '').toUpperCase();
-    if (!authState.allowedMonths.includes(month)) {
-      return res.status(403).json({ error: `You are not subscribed to ${month}` });
-    }
-
-    const driveUrl = await resolveGoogleDriveUrl(normalizedRelativePath, matched.storageEntry);
-    if (!driveUrl) {
-      return res.status(404).json({
-        error: `Missing Google Drive mapping for ${normalizedRelativePath}. Update ${GOOGLE_DRIVE_INDEX_PATH} or configure GOOGLE_DRIVE_ROOT_FOLDER with Drive API access.`,
-      });
-    }
-
-    return res.redirect(302, driveUrl);
-  } catch (error) {
-    return res.status(500).json({ error: `Failed to resolve encrypted content URL: ${error.message}` });
-  } finally {
-    client.release();
-  }
-});
-
-app.get(/^\/pdf\/(.+)$/, authMiddleware, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const authState = await getContentAccessFromToken(client, req.user);
-    if (authState.error) {
-      return res.status(authState.status || 401).json({ error: authState.error });
-    }
-
-    const requestedRelativePath = decodeURIComponent(String(req.params[0] || ''));
-    const normalizedRelativePath = normalizeRelativeStoragePath(requestedRelativePath);
-
-    const catalog = readCatalog();
-    const matchedPdf = catalog.pdfs.find((pdf) => {
-      const rel = normalizeRelativeStoragePath(String(pdf?.storage?.relativePath || ''));
-      return rel === normalizedRelativePath;
-    });
-
-    if (!matchedPdf) {
-      return res.status(404).json({ error: 'PDF not found in catalog' });
-    }
-
-    const month = String(matchedPdf.month || '').toUpperCase();
-    if (!authState.allowedMonths.includes(month)) {
-      return res.status(403).json({ error: `You are not subscribed to ${month}` });
-    }
-
-    const driveUrl = await resolveGoogleDriveUrl(normalizedRelativePath, matchedPdf?.storage);
-    if (!driveUrl) {
-      return res.status(404).json({
-        error: `Missing Google Drive mapping for ${normalizedRelativePath}. Update google_drive_index.json.`,
-      });
-    }
-
-    return res.redirect(302, driveUrl);
-  } catch (error) {
-    return res.status(500).json({ error: `Failed to resolve PDF URL: ${error.message}` });
-  } finally {
-    client.release();
-  }
-});
-
-app.get('/videos/:videoId/plain', authMiddleware, async (req, res) => {
+app.get(/^\/storage\/(.+)$/, authMiddleware, (req, res) => {
   return res.status(410).json({
-    error: 'Legacy plain video records are no longer supported. Publish sessions through the catalog instead.',
+    error: 'Legacy /storage/* route is deprecated. Use /videos/:videoId/content from the playback license response.',
+  });
+});
+
+app.get(/^\/pdf\/(.+)$/, authMiddleware, (req, res) => {
+  return res.status(410).json({
+    error: 'Legacy /pdf/* route is deprecated. Use /pdfs/:pdfId/content.',
+  });
+});
+
+app.get('/videos/:videoId/plain', authMiddleware, (req, res) => {
+  return res.status(410).json({
+    error: 'Legacy plain video records are no longer supported. Use DB-backed sessions.',
   });
 });
 
