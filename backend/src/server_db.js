@@ -884,6 +884,229 @@ async function buildStudentDashboardPayload(client, authState, monthsPayload = n
   };
 }
 
+function getPreviousCalendarMonthRangeUtc(now = new Date()) {
+  const startOfCurrentMonthUtc = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    1,
+    0,
+    0,
+    0,
+    0,
+  ));
+  const startOfPreviousMonthUtc = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth() - 1,
+    1,
+    0,
+    0,
+    0,
+    0,
+  ));
+
+  return {
+    start: startOfPreviousMonthUtc,
+    end: startOfCurrentMonthUtc,
+    label: startOfPreviousMonthUtc.toLocaleString('en-US', {
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'UTC',
+    }),
+  };
+}
+
+function isEnrolledStudentRow(row) {
+  return String(row?.full_name || '').trim().length > 0;
+}
+
+async function buildAdminStudentsStatisticsPayload(client) {
+  const latestAvailableMonthNumber = await getLatestAvailableMonthNumber(client);
+  const { start, end, label } = getPreviousCalendarMonthRangeUtc();
+
+  const studentsResult = await client.query(
+    `SELECT id::text AS id, serial_no, full_name, active, allowed_months
+     FROM "${studentTable}"`,
+  );
+  const enrolledStudents = studentsResult.rows.filter(
+    (row) => row?.active !== false && isEnrolledStudentRow(row),
+  );
+  const totalEnrolledStudents = enrolledStudents.length;
+
+  const requiredMonths = [];
+  for (let monthNumber = 1; monthNumber <= latestAvailableMonthNumber; monthNumber += 1) {
+    requiredMonths.push(`M${monthNumber}`);
+  }
+  const compliantStudentsToCurrentMonth = enrolledStudents.filter((studentRow) => {
+    const allowedMonths = normalizeAllowedMonths(studentRow.allowed_months);
+    return requiredMonths.every((monthCode) => allowedMonths.includes(monthCode));
+  }).length;
+
+  const watchedByStudentId = new Map();
+  try {
+    const watchedResult = await client.query(
+      `SELECT student_id::text AS student_id, COUNT(*)::int AS watched_count
+       FROM student_video_watches
+       WHERE qualified_at >= $1::timestamptz
+         AND qualified_at < $2::timestamptz
+       GROUP BY student_id`,
+      [start.toISOString(), end.toISOString()],
+    );
+    for (const row of watchedResult.rows) {
+      watchedByStudentId.set(
+        String(row.student_id || ''),
+        Number(row.watched_count) || 0,
+      );
+    }
+  } catch (error) {
+    if (error?.code !== '42P01') throw error;
+  }
+
+  const solvedByStudentId = new Map();
+  try {
+    const solvedResult = await client.query(
+      `SELECT student_id::text AS student_id, COUNT(*)::int AS solved_count
+       FROM quiz_results
+       WHERE created_at >= $1::timestamptz
+         AND created_at < $2::timestamptz
+       GROUP BY student_id`,
+      [start.toISOString(), end.toISOString()],
+    );
+    for (const row of solvedResult.rows) {
+      solvedByStudentId.set(
+        String(row.student_id || ''),
+        Number(row.solved_count) || 0,
+      );
+    }
+  } catch (error) {
+    if (error?.code !== '42P01') throw error;
+  }
+
+  const mostActiveStudents = enrolledStudents
+    .map((studentRow) => {
+      const studentId = String(studentRow.id || '');
+      const watchedSessionsLastMonth = watchedByStudentId.get(studentId) || 0;
+      const solvedQuizzesLastMonth = solvedByStudentId.get(studentId) || 0;
+      return {
+        serial: String(studentRow.serial_no || '').trim().toUpperCase(),
+        fullName: String(studentRow.full_name || '').trim(),
+        watchedSessionsLastMonth,
+        solvedQuizzesLastMonth,
+        activityScoreLastMonth: watchedSessionsLastMonth + solvedQuizzesLastMonth,
+      };
+    })
+    .sort((a, b) => (
+      (b.activityScoreLastMonth - a.activityScoreLastMonth)
+      || (b.watchedSessionsLastMonth - a.watchedSessionsLastMonth)
+      || (b.solvedQuizzesLastMonth - a.solvedQuizzesLastMonth)
+      || a.fullName.localeCompare(b.fullName)
+    ))
+    .slice(0, 10);
+
+  const topScoreStudents = [];
+  try {
+    const quizAttemptsResult = await client.query(
+      `SELECT qr.student_id::text AS student_id,
+              qr.session_id::text AS session_id,
+              qr.score,
+              qr.total_questions,
+              st.serial_no,
+              st.full_name
+       FROM quiz_results qr
+       INNER JOIN "${studentTable}" st
+         ON st.id = qr.student_id
+       WHERE st.active = TRUE
+         AND COALESCE(TRIM(st.full_name), '') <> ''`,
+    );
+
+    if (quizAttemptsResult.rowCount > 0) {
+      const sessionIds = Array.from(new Set(
+        quizAttemptsResult.rows.map((row) => String(row.session_id || '')).filter(Boolean),
+      ));
+      const totalPointsBySessionId = new Map();
+
+      if (sessionIds.length > 0) {
+        try {
+          const quizSessionsResult = await client.query(
+            `SELECT session_id::text AS session_id, encrypted_metadata
+             FROM quiz_sessions
+             WHERE session_id = ANY($1::uuid[])`,
+            [sessionIds],
+          );
+          for (const row of quizSessionsResult.rows) {
+            const sessionId = String(row.session_id || '');
+            let totalPoints = 0;
+            try {
+              totalPoints = buildFolderQuizMetadataDefinition({
+                encrypted_metadata: row.encrypted_metadata,
+              }).totalPoints;
+            } catch {
+              totalPoints = 0;
+            }
+            totalPointsBySessionId.set(sessionId, Number(totalPoints) || 0);
+          }
+        } catch (error) {
+          if (error?.code !== '42P01') throw error;
+        }
+      }
+
+      const scoreAccumulator = new Map();
+      for (const row of quizAttemptsResult.rows) {
+        const studentId = String(row.student_id || '');
+        if (!studentId) continue;
+
+        const sessionId = String(row.session_id || '');
+        let totalPoints = Number(totalPointsBySessionId.get(sessionId)) || 0;
+        if (totalPoints <= 0) {
+          const totalQuestions = Number(row.total_questions) || 0;
+          totalPoints = totalQuestions > 0 ? totalQuestions : 0;
+        }
+        if (totalPoints <= 0) continue;
+
+        const rawPercent = ((Number(row.score) || 0) / totalPoints) * 100;
+        const quizPercent = Math.max(0, Math.min(100, rawPercent));
+        const current = scoreAccumulator.get(studentId) || {
+          serial: String(row.serial_no || '').trim().toUpperCase(),
+          fullName: String(row.full_name || '').trim(),
+          sumPercent: 0,
+          quizzesCount: 0,
+        };
+        current.sumPercent += quizPercent;
+        current.quizzesCount += 1;
+        scoreAccumulator.set(studentId, current);
+      }
+
+      topScoreStudents.push(
+        ...Array.from(scoreAccumulator.values())
+          .filter((student) => student.quizzesCount > 0)
+          .map((student) => ({
+            serial: student.serial,
+            fullName: student.fullName,
+            quizzesCount: student.quizzesCount,
+            averageScorePercent: student.sumPercent / student.quizzesCount,
+          }))
+          .sort((a, b) => (
+            (b.averageScorePercent - a.averageScorePercent)
+            || (b.quizzesCount - a.quizzesCount)
+            || a.fullName.localeCompare(b.fullName)
+          ))
+          .slice(0, 10),
+      );
+    }
+  } catch (error) {
+    if (error?.code !== '42P01') throw error;
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    lastMonthLabel: label,
+    totalEnrolledStudents,
+    compliantStudentsToCurrentMonth,
+    latestAvailableMonthNumber,
+    mostActiveStudents,
+    topScoreStudents,
+  };
+}
+
 function normalizeQuizMetadata(rawValue) {
   if (!rawValue) return [];
   let parsed = rawValue;
@@ -2305,6 +2528,135 @@ app.post('/admin/quizzes', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: `Failed to add quiz session: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/admin/students-statistics', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const statistics = await buildAdminStudentsStatisticsPayload(client);
+    return res.json({
+      statistics,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to load students statistics: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/admin/quiz-marks', authMiddleware, async (req, res) => {
+  const serialQuery = normalizeSerial(req.query.serial);
+  const month = normalizeMonthCode(req.query.month);
+  const session = normalizeSessionCode(req.query.session);
+
+  if (!serialQuery) {
+    return res.status(400).json({ error: 'serial is required' });
+  }
+  if (!month) {
+    return res.status(400).json({ error: 'month must be in the form M1..M12' });
+  }
+  if (!session) {
+    return res.status(400).json({ error: 'session must be in the form S1, S2, ...' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const sessionResult = await client.query(
+      `SELECT id
+       FROM sessions
+       WHERE month_code = $1
+         AND session_code = $2
+       LIMIT 1`,
+      [month, session],
+    );
+    const sessionId = String(sessionResult.rows[0]?.id || '').trim();
+    if (!sessionId) {
+      return res.json({
+        result: {
+          month,
+          session,
+          totalPoints: 0,
+          rows: [],
+        },
+      });
+    }
+
+    let totalPoints = 0;
+    try {
+      const quizSessionConfig = await getQuizSessionConfig(client, sessionId);
+      if (quizSessionConfig) {
+        try {
+          totalPoints = Number(buildFolderQuizMetadataDefinition(quizSessionConfig).totalPoints) || 0;
+        } catch {
+          totalPoints = 0;
+        }
+      }
+    } catch (error) {
+      if (error?.code !== '42P01') throw error;
+    }
+
+    const result = await client.query(
+      `SELECT st.serial_no,
+              st.full_name,
+              st.phone_number,
+              st.email,
+              st.parent_phone_number,
+              qr.score,
+              qr.total_questions
+       FROM quiz_results qr
+       INNER JOIN "${studentTable}" st
+         ON st.id = qr.student_id
+       WHERE qr.session_id = $1::uuid
+         AND UPPER(st.serial_no) LIKE UPPER($2)
+       ORDER BY st.serial_no ASC`,
+      [sessionId, `%${serialQuery}%`],
+    );
+
+    const rows = result.rows.map((row) => {
+      const score = Number(row.score) || 0;
+      let denominator = totalPoints;
+      if (denominator <= 0) {
+        const totalQuestions = Number(row.total_questions) || 0;
+        denominator = totalQuestions > 0 ? totalQuestions : 0;
+      }
+      const quizMarkPercent = denominator > 0
+        ? Math.max(0, Math.min(100, (score / denominator) * 100))
+        : 0;
+
+      return {
+        serial: String(row.serial_no || '').trim().toUpperCase(),
+        fullName: String(row.full_name || '').trim(),
+        email: String(row.email || '').trim(),
+        phoneNumber: String(row.phone_number || '').trim(),
+        parentPhoneNumber: String(row.parent_phone_number || '').trim(),
+        quizMark: score,
+        quizMarkPercent,
+      };
+    });
+
+    return res.json({
+      result: {
+        month,
+        session,
+        totalPoints,
+        rows,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to load quiz marks: ${error.message}` });
   } finally {
     client.release();
   }
