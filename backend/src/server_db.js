@@ -2258,7 +2258,7 @@ app.post('/admin/serials', authMiddleware, async (req, res) => {
 app.patch('/admin/serials/status', authMiddleware, async (req, res) => {
   const rawSerials = Array.isArray(req.body.serials) ? req.body.serials : [];
   const serials = Array.from(new Set(
-    rawSerials.map((serial) => normalizeManagedSerial(serial)).filter(Boolean),
+    rawSerials.map((serial) => normalizeSerial(serial)).filter(Boolean),
   ));
   const active = req.body.active === true;
 
