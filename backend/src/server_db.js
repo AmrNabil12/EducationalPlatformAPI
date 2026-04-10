@@ -946,8 +946,8 @@ async function buildAdminStudentsStatisticsPayload(client) {
     const watchedResult = await client.query(
       `SELECT student_id::text AS student_id, COUNT(*)::int AS watched_count
        FROM student_video_watches
-       WHERE COALESCE(updated_at, qualified_at) >= $1::timestamptz
-         AND COALESCE(updated_at, qualified_at) < $2::timestamptz
+       WHERE COALESCE(qualified_at, updated_at) >= $1::timestamptz
+         AND COALESCE(qualified_at, updated_at) < $2::timestamptz
        GROUP BY student_id`,
       [start.toISOString(), end.toISOString()],
     );
