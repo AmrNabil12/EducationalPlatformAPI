@@ -2557,9 +2557,6 @@ app.get('/admin/quiz-marks', authMiddleware, async (req, res) => {
   const month = normalizeMonthCode(req.query.month);
   const session = normalizeSessionCode(req.query.session);
 
-  if (!serialQuery) {
-    return res.status(400).json({ error: 'serial is required' });
-  }
   if (!month) {
     return res.status(400).json({ error: 'month must be in the form M1..M12' });
   }
@@ -2620,9 +2617,9 @@ app.get('/admin/quiz-marks', authMiddleware, async (req, res) => {
        INNER JOIN "${studentTable}" st
          ON st.id = qr.student_id
        WHERE qr.session_id = $1::uuid
-         AND UPPER(st.serial_no) LIKE UPPER($2)
+         AND ($2 = '' OR UPPER(st.serial_no) LIKE UPPER($3))
        ORDER BY st.serial_no ASC`,
-      [sessionId, `%${serialQuery}%`],
+      [sessionId, serialQuery, `%${serialQuery}%`],
     );
 
     const rows = result.rows.map((row) => {
