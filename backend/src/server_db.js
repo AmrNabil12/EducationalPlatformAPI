@@ -921,7 +921,7 @@ function isEnrolledStudentRow(row) {
 
 async function buildAdminStudentsStatisticsPayload(client) {
   const latestAvailableMonthNumber = await getLatestAvailableMonthNumber(client);
-  const { start, end, label } = getPreviousCalendarMonthRangeUtc();
+  const { label } = getPreviousCalendarMonthRangeUtc();
 
   const studentsResult = await client.query(
     `SELECT id::text AS id, serial_no, full_name, active, allowed_months
@@ -944,12 +944,9 @@ async function buildAdminStudentsStatisticsPayload(client) {
   const watchedByStudentId = new Map();
   try {
     const watchedResult = await client.query(
-      `SELECT student_id::text AS student_id, COUNT(*)::int AS watched_count
+      `SELECT student_id::text AS student_id, COUNT(DISTINCT video_id)::int AS watched_count
        FROM student_video_watches
-       WHERE COALESCE(qualified_at, updated_at) >= $1::timestamptz
-         AND COALESCE(qualified_at, updated_at) < $2::timestamptz
        GROUP BY student_id`,
-      [start.toISOString(), end.toISOString()],
     );
     for (const row of watchedResult.rows) {
       watchedByStudentId.set(
@@ -964,12 +961,9 @@ async function buildAdminStudentsStatisticsPayload(client) {
   const solvedByStudentId = new Map();
   try {
     const solvedResult = await client.query(
-      `SELECT student_id::text AS student_id, COUNT(*)::int AS solved_count
+      `SELECT student_id::text AS student_id, COUNT(DISTINCT session_id)::int AS solved_count
        FROM quiz_results
-       WHERE created_at >= $1::timestamptz
-         AND created_at < $2::timestamptz
        GROUP BY student_id`,
-      [start.toISOString(), end.toISOString()],
     );
     for (const row of solvedResult.rows) {
       solvedByStudentId.set(
