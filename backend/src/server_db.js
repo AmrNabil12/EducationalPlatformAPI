@@ -85,6 +85,7 @@ const pool = new Pool({
 });
 
 const MONTHS = Array.from({ length: 12 }, (_, i) => `M${i + 1}`);
+let quizSolutionColumnReady = false;
 
 function normalizeSerial(serial) {
   return String(serial || '').trim().toUpperCase();
@@ -664,6 +665,45 @@ function normalizeAdminQuizPayload(value) {
   };
 }
 
+function normalizeQuizSolutionRecord(value) {
+  const raw = value && typeof value === 'object' ? value : null;
+  if (!raw) {
+    return { error: 'solution payload is required' };
+  }
+
+  const title = normalizeName(raw.title);
+  const month = normalizeMonthCode(raw.month);
+  const session = normalizeSessionCode(raw.session);
+  const solutionDriveUrl = normalizeGoogleDriveValue(
+    raw.googleDriveUrl
+    || raw.google_drive_url
+    || raw.solutionDriveUrl
+    || raw.solution_drive_url,
+  );
+
+  if (!title) {
+    return { error: 'Quiz solution title is required' };
+  }
+  if (!month) {
+    return { error: 'Quiz solution month must be in the form M1..M12' };
+  }
+  if (!session) {
+    return { error: 'Quiz solution session must be in the form S1, S2, ...' };
+  }
+  if (!solutionDriveUrl) {
+    return { error: 'Quiz solution Google Drive URL is required' };
+  }
+
+  return {
+    record: {
+      title,
+      month,
+      session,
+      solutionDriveUrl,
+    },
+  };
+}
+
 async function getSessionById(client, sessionId) {
   const result = await client.query(
     `SELECT id, month_code, session_code, title
@@ -684,6 +724,29 @@ async function getQuizSessionConfig(client, sessionId) {
     [sessionId],
   );
   return result.rows[0] || null;
+}
+
+async function ensureQuizSolutionDriveUrlColumn(client) {
+  if (quizSolutionColumnReady) {
+    return;
+  }
+
+  const existsResult = await client.query(
+    `SELECT 1
+     FROM information_schema.columns
+     WHERE table_name = 'quiz_sessions'
+       AND column_name = 'solution_drive_url'
+     LIMIT 1`,
+  );
+  if (existsResult.rowCount > 0) {
+    quizSolutionColumnReady = true;
+    return;
+  }
+
+  await client.query(
+    'ALTER TABLE quiz_sessions ADD COLUMN solution_drive_url TEXT',
+  );
+  quizSolutionColumnReady = true;
 }
 
 async function loadQuizEnabledSessionIds(client) {
@@ -2625,6 +2688,71 @@ app.post('/admin/quizzes', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: `Failed to add quiz session: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/admin/quizzes/solution', authMiddleware, async (req, res) => {
+  const normalized = normalizeQuizSolutionRecord(req.body?.solution);
+  if (normalized.error) {
+    return res.status(400).json({ error: normalized.error });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    await ensureQuizSolutionDriveUrlColumn(client);
+
+    const solutionRecord = normalized.record;
+    const sessionResult = await client.query(
+      `SELECT id
+       FROM sessions
+       WHERE month_code = $1
+         AND session_code = $2
+       LIMIT 1`,
+      [solutionRecord.month, solutionRecord.session],
+    );
+    const sessionId = String(sessionResult.rows[0]?.id || '').trim();
+    if (!sessionId) {
+      return res.status(404).json({
+        error: `No session was found for ${solutionRecord.month}${solutionRecord.session}. Add the quiz first.`,
+      });
+    }
+
+    const updateResult = await client.query(
+      `UPDATE quiz_sessions
+       SET solution_drive_url = $2,
+           updated_at = NOW()
+       WHERE session_id = $1::uuid
+       RETURNING session_id::text AS session_id, solution_drive_url, updated_at`,
+      [sessionId, solutionRecord.solutionDriveUrl],
+    );
+
+    if (updateResult.rowCount === 0) {
+      return res.status(404).json({
+        error: `No quiz session exists for ${solutionRecord.month}${solutionRecord.session}. Add the quiz first.`,
+      });
+    }
+
+    const row = updateResult.rows[0];
+    return res.status(201).json({
+      message: 'Quiz solution saved successfully',
+      solution: {
+        sessionId: String(row.session_id || ''),
+        title: solutionRecord.title,
+        month: solutionRecord.month,
+        session: solutionRecord.session,
+        solutionDriveUrl: String(row.solution_drive_url || ''),
+        updatedAt: row.updated_at,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to save quiz solution: ${error.message}` });
   } finally {
     client.release();
   }
