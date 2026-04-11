@@ -716,14 +716,32 @@ async function getSessionById(client, sessionId) {
 }
 
 async function getQuizSessionConfig(client, sessionId) {
-  const result = await client.query(
-    `SELECT id, session_id, drive_folder_id, encrypted_metadata, question_count, created_at, updated_at
-     FROM quiz_sessions
-     WHERE session_id = $1
-     LIMIT 1`,
-    [sessionId],
-  );
-  return result.rows[0] || null;
+  let result;
+  try {
+    result = await client.query(
+      `SELECT id, session_id, drive_folder_id, encrypted_metadata, question_count, solution_drive_url, created_at, updated_at
+       FROM quiz_sessions
+       WHERE session_id = $1
+       LIMIT 1`,
+      [sessionId],
+    );
+  } catch (error) {
+    if (error?.code !== '42703') throw error;
+    result = await client.query(
+      `SELECT id, session_id, drive_folder_id, encrypted_metadata, question_count, created_at, updated_at
+       FROM quiz_sessions
+       WHERE session_id = $1
+       LIMIT 1`,
+      [sessionId],
+    );
+  }
+
+  const row = result.rows[0] || null;
+  if (!row) return null;
+  return {
+    ...row,
+    solution_drive_url: String(row.solution_drive_url || ''),
+  };
 }
 
 async function ensureQuizSolutionDriveUrlColumn(client) {
@@ -1522,12 +1540,16 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
       sessionId: String(sessionRow.id),
       month: String(sessionRow.month_code || ''),
       session: String(sessionRow.session_code || ''),
+      solutionDriveUrl: '',
       totalQuestions: 0,
       totalPoints: 0,
     };
   }
 
   const definition = buildFolderQuizMetadataDefinition(quizSessionConfig);
+  const solutionDriveUrl = normalizeGoogleDriveValue(
+    quizSessionConfig.solution_drive_url,
+  );
   const hasQuiz = definition.questionCount > 0;
   if (!studentId) {
     return {
@@ -1537,6 +1559,7 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
       sessionId: String(sessionRow.id),
       month: String(sessionRow.month_code || ''),
       session: String(sessionRow.session_code || ''),
+      solutionDriveUrl,
       totalQuestions: definition.questionCount,
       totalPoints: definition.totalPoints,
     };
@@ -1558,6 +1581,7 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
       sessionId: String(sessionRow.id),
       month: String(sessionRow.month_code || ''),
       session: String(sessionRow.session_code || ''),
+      solutionDriveUrl,
       totalQuestions: definition.questionCount,
       totalPoints: definition.totalPoints,
     };
@@ -1572,6 +1596,7 @@ async function buildQuizStatusPayload(client, studentId, sessionRow, publicKeyPe
     sessionId: String(sessionRow.id),
     month: String(sessionRow.month_code || ''),
     session: String(sessionRow.session_code || ''),
+    solutionDriveUrl,
     totalQuestions: definition.questionCount,
     totalPoints: definition.totalPoints,
     result: {
@@ -1601,6 +1626,7 @@ async function buildQuizContentPayload(
       sessionId: String(sessionRow.id),
       month: String(sessionRow.month_code || ''),
       session: String(sessionRow.session_code || ''),
+      solutionDriveUrl: '',
       totalQuestions: 0,
       totalPoints: 0,
       questions: [],
@@ -1608,6 +1634,9 @@ async function buildQuizContentPayload(
   }
 
   const definition = await buildFolderQuizDefinition(quizSessionConfig);
+  const solutionDriveUrl = normalizeGoogleDriveValue(
+    quizSessionConfig.solution_drive_url,
+  );
   if (!publicKeyPem && !allowPlainMetadataKey) {
     throw new Error('Missing student public key for encrypted quiz metadata');
   }
@@ -1650,6 +1679,7 @@ async function buildQuizContentPayload(
     sessionId: String(sessionRow.id),
     month: String(sessionRow.month_code || ''),
     session: String(sessionRow.session_code || ''),
+    solutionDriveUrl,
     totalQuestions: definition.questionCount,
     totalPoints: definition.totalPoints,
     questions: definition.questions.map(mapFolderQuizQuestionForPlayer),
