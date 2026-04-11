@@ -170,6 +170,13 @@ function normalizeAllowedMonths(value) {
   return MONTHS.filter((month) => normalized.includes(month));
 }
 
+function serializeAllowedMonths(months) {
+  const normalized = Array.isArray(months)
+    ? months.map((month) => String(month || '').trim().toUpperCase())
+    : [];
+  return MONTHS.filter((month) => normalized.includes(month)).join(' ');
+}
+
 function aesGcmDecrypt(key, nonceB64, encryptedB64) {
   const iv = Buffer.from(String(nonceB64 || ''), 'base64');
   const encrypted = Buffer.from(String(encryptedB64 || ''), 'base64');
@@ -259,11 +266,13 @@ function mapStudentProfile(row) {
 }
 
 function mapAdminSerialRow(row) {
+  const enrolledMonths = normalizeAllowedMonths(row?.allowed_months);
   return {
     serial: String(row?.serial_no || '').trim().toUpperCase(),
     fullName: String(row?.full_name || '').trim(),
     email: String(row?.email || '').trim(),
     phoneNumber: String(row?.phone_number || '').trim(),
+    enrolledMonths,
     active: row?.active !== false,
     createdAt: row?.created_at || null,
   };
@@ -2172,7 +2181,7 @@ app.get('/admin/serials', authMiddleware, async (req, res) => {
       : [limit];
     const result = await client.query(
       hasQuery
-        ? `SELECT serial_no, full_name, email, phone_number, active, created_at
+        ? `SELECT serial_no, full_name, email, phone_number, active, created_at, allowed_months
            FROM "${studentTable}"
            WHERE UPPER(serial_no) LIKE UPPER($1)
               OR UPPER(COALESCE(full_name, '')) LIKE UPPER($1)
@@ -2180,7 +2189,7 @@ app.get('/admin/serials', authMiddleware, async (req, res) => {
               OR COALESCE(phone_number, '') LIKE $1
            ORDER BY created_at DESC, serial_no ASC
            LIMIT $2`
-        : `SELECT serial_no, full_name, email, phone_number, active, created_at
+        : `SELECT serial_no, full_name, email, phone_number, active, created_at, allowed_months
            FROM "${studentTable}"
            ORDER BY created_at DESC, serial_no ASC
            LIMIT $1`,
@@ -2227,7 +2236,7 @@ app.post('/admin/serials', authMiddleware, async (req, res) => {
         `INSERT INTO "${studentTable}" (serial_no, active, allowed_months)
          VALUES ($1, TRUE, '')
          ON CONFLICT (serial_no) DO NOTHING
-         RETURNING serial_no, full_name, email, phone_number, active, created_at`,
+         RETURNING serial_no, full_name, email, phone_number, active, created_at, allowed_months`,
         [serial],
       );
 
@@ -2272,7 +2281,7 @@ app.patch('/admin/serials/status', authMiddleware, async (req, res) => {
        SET active = $1,
            updated_at = NOW()
        WHERE UPPER(serial_no) = ANY($2::text[])
-       RETURNING serial_no, full_name, email, phone_number, active, created_at`,
+       RETURNING serial_no, full_name, email, phone_number, active, created_at, allowed_months`,
       [active, serials.map((serial) => serial.toUpperCase())],
     );
 
@@ -2282,6 +2291,100 @@ app.patch('/admin/serials/status', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: `Failed to update serial status: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
+app.patch('/admin/serials/subscription', authMiddleware, async (req, res) => {
+  const rawSerials = Array.isArray(req.body.serials) ? req.body.serials : [];
+  const serials = Array.from(new Set(
+    rawSerials.map((serial) => normalizeSerial(serial)).filter(Boolean),
+  ));
+  const action = String(req.body.action || '').trim().toLowerCase();
+  const month = normalizeMonthCode(req.body.month);
+
+  if (serials.length === 0) {
+    return res.status(400).json({ error: 'At least one valid serial is required' });
+  }
+  if (action !== 'add' && action !== 'remove') {
+    return res.status(400).json({ error: 'action must be either add or remove' });
+  }
+  if (!month) {
+    return res.status(400).json({ error: 'month must be in M1..M12 format' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const latestAvailableMonthNumber = await getLatestAvailableMonthNumber(client);
+    const monthNumber = extractMonthNumber(month);
+    if (
+      latestAvailableMonthNumber > 0
+      && monthNumber > 0
+      && monthNumber > latestAvailableMonthNumber
+    ) {
+      return res.status(400).json({
+        error: `Month ${month} is not available yet (latest month is M${latestAvailableMonthNumber})`,
+      });
+    }
+
+    await client.query('BEGIN');
+
+    const existing = await client.query(
+      `SELECT serial_no, full_name, email, phone_number, active, created_at, allowed_months
+       FROM "${studentTable}"
+       WHERE UPPER(serial_no) = ANY($1::text[])`,
+      [serials.map((serial) => serial.toUpperCase())],
+    );
+
+    const bySerial = new Map();
+    for (const row of existing.rows) {
+      bySerial.set(normalizeSerial(row.serial_no), row);
+    }
+
+    const updated = [];
+    for (const serial of serials) {
+      const row = bySerial.get(normalizeSerial(serial));
+      if (!row) continue;
+
+      const currentMonths = normalizeAllowedMonths(row.allowed_months);
+      const nextMonths = action === 'add'
+        ? serializeAllowedMonths([...currentMonths, month])
+        : serializeAllowedMonths(currentMonths.filter((code) => code !== month));
+
+      const updateResult = await client.query(
+        `UPDATE "${studentTable}"
+         SET allowed_months = $1,
+             updated_at = NOW()
+         WHERE UPPER(serial_no) = UPPER($2)
+         RETURNING serial_no, full_name, email, phone_number, active, created_at, allowed_months`,
+        [nextMonths, serial],
+      );
+
+      if (updateResult.rowCount > 0) {
+        updated.push(mapAdminSerialRow(updateResult.rows[0]));
+      }
+    }
+
+    await client.query('COMMIT');
+    return res.json({
+      updated,
+      requestedCount: serials.length,
+      action,
+      month,
+    });
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore rollback error
+    }
+    return res.status(500).json({ error: `Failed to update subscriptions: ${error.message}` });
   } finally {
     client.release();
   }
