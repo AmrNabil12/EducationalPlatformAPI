@@ -115,6 +115,24 @@ function normalizeGmailAddress(value) {
   return /^[a-z0-9._%+-]+@gmail\.com$/.test(normalized) ? normalized : '';
 }
 
+function hasCompletedStudentSignup(student) {
+  if (!student || typeof student !== 'object') return false;
+
+  const fullName = normalizeName(student.full_name);
+  const gender = normalizeGender(student.gender);
+  const phoneNumber = normalizePhoneNumber(student.phone_number);
+  const parentPhoneNumber = normalizePhoneNumber(student.parent_phone_number);
+  const email = normalizeGmailAddress(student.email);
+
+  return Boolean(
+    fullName
+      && gender
+      && phoneNumber
+      && parentPhoneNumber
+      && email,
+  );
+}
+
 function decodePublicKeyPemHeader(req) {
   const encoded = String(req.get('x-student-public-key-b64') || '').trim();
   if (!encoded) return '';
@@ -2135,6 +2153,12 @@ app.post('/auth/login', async (req, res) => {
 
     if (student.active === false) {
       return res.status(403).json({ error: 'Serial is inactive' });
+    }
+
+    if (!hasCompletedStudentSignup(student)) {
+      return res.status(403).json({
+        error: 'Please complete sign-up first before signing in.',
+      });
     }
 
     const existingDeviceId = String(student.device_id || '').trim();
