@@ -2026,7 +2026,7 @@ app.post('/auth/signup', async (req, res) => {
     return res.status(400).json({ error: 'email must be a valid gmail address' });
   }
   if (!deviceId) {
-    return res.status(400).json({ error: 'deviceId is required for sign-up' });
+    return res.status(400).json({ error: 'Your device is already bound to another serial' });
   }
 
   const client = await pool.connect();
