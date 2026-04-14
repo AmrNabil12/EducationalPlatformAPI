@@ -2005,6 +2005,7 @@ app.post('/auth/signup', async (req, res) => {
   const phoneNumber = normalizePhoneNumber(req.body.phoneNumber);
   const parentPhoneNumber = normalizePhoneNumber(req.body.parentPhoneNumber);
   const email = normalizeGmailAddress(req.body.email);
+  const deviceId = String(req.body.deviceId || '').trim();
 
   if (!fullName) {
     return res.status(400).json({ error: 'name is required' });
@@ -2024,6 +2025,9 @@ app.post('/auth/signup', async (req, res) => {
   if (!email) {
     return res.status(400).json({ error: 'email must be a valid gmail address' });
   }
+  if (!deviceId) {
+    return res.status(400).json({ error: 'deviceId is required for sign-up' });
+  }
 
   const client = await pool.connect();
   try {
@@ -2033,6 +2037,26 @@ app.post('/auth/signup', async (req, res) => {
     }
     if (existing?.active === false) {
       return res.status(403).json({ error: 'This serial is inactive' });
+    }
+    const existingDeviceId = String(existing.device_id || '').trim();
+    if (existingDeviceId && existingDeviceId !== deviceId) {
+      return res.status(403).json({
+        error: 'This serial is already bound to another device.',
+      });
+    }
+
+    const boundToOtherSerial = await client.query(
+      `SELECT serial_no
+       FROM "${studentTable}"
+       WHERE device_id = $1
+         AND UPPER(serial_no) <> UPPER($2)
+       LIMIT 1`,
+      [deviceId, serial],
+    );
+    if (boundToOtherSerial.rows.length > 0) {
+      return res.status(403).json({
+        error: 'This device is already registered with another serial. Please sign in with the original serial or contact support.',
+      });
     }
 
     await client.query(
