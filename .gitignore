@@ -11,3 +11,10 @@ backend/*.log
 
 # Allow the gitignore itself
 !/.gitignore
+
+# Allow deployment config at repo root (Railway/Docker)
+!/Dockerfile
+!/.dockerignore
+!/railway.toml
+!/nixpacks.toml
+!/railway.json

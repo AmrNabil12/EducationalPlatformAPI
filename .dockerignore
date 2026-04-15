@@ -1,0 +1,13 @@
+# Keep the Docker build context small (especially if you later un-ignore more files)
+.git
+.vscode
+.dart_tool
+.kilo
+flutter_app
+admin_tools
+encrypted
+decrypted_cache
+_backend
+**/node_modules
+backend/.env
+*.log
