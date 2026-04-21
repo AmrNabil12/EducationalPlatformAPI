@@ -86,8 +86,6 @@ const pool = new Pool({
 
 const MONTHS = Array.from({ length: 12 }, (_, i) => `M${i + 1}`);
 let quizSolutionColumnReady = false;
-let monthsObjectiveTableReady = false;
-
 
 function normalizeSerial(serial) {
   return String(serial || '').trim().toUpperCase();
@@ -399,9 +397,7 @@ function buildSessionVideoRecord(row) {
     storage: metadata.storage,
     googleDriveUrl: metadata.googleDriveUrl,
     createdAt: metadata.createdAt,
-    details: metadata.details || { concepts_explained: '', skills_earned: '' },
   };
-
 }
 
 function buildSessionVideoContentUrl(videoId) {
@@ -548,12 +544,6 @@ function normalizePendingEncryptedVideoRecord(value) {
   const createdAtRaw = String(raw.createdAt || '').trim();
   const createdAtDate = createdAtRaw ? new Date(createdAtRaw) : new Date();
 
-  const details = raw.details && typeof raw.details === 'object' ? raw.details : {};
-  const conceptsExplained = String(details.concepts_explained || details.conceptsExplained || '').trim();
-  const skillsEarned = String(details.skills_earned || details.skillsEarned || '').trim();
-  const monthObjective = String(raw.monthObjective || '').trim();
-
-
   if (!title) {
     return { error: 'Encrypted video title is required' };
   }
@@ -598,15 +588,9 @@ function normalizePendingEncryptedVideoRecord(value) {
         createdAt: Number.isNaN(createdAtDate.getTime())
           ? new Date().toISOString()
           : createdAtDate.toISOString(),
-        details: {
-          concepts_explained: conceptsExplained,
-          skills_earned: skillsEarned,
-        },
       },
-      monthObjective,
     },
   };
-
 }
 
 function normalizePendingPdfRecord(value) {
@@ -815,32 +799,7 @@ function extractMonthNumber(value) {
   return Number(match[1]) || null;
 }
 
-async function ensureMonthsObjectiveTable(client) {
-  if (monthsObjectiveTableReady) return;
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS months_objective (
-      month_code TEXT PRIMARY KEY,
-      objective TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
-  monthsObjectiveTableReady = true;
-}
-
-async function loadMonthsObjectives(client, months) {
-  await ensureMonthsObjectiveTable(client);
-  if (!months || months.length === 0) return new Map();
-  const result = await client.query(
-    'SELECT month_code, objective FROM months_objective WHERE month_code = ANY($1)',
-    [months],
-  );
-  return new Map(result.rows.map((r) => [normalizeMonthCode(r.month_code), r.objective]));
-}
-
 async function buildAuthorizedMonthsPayload(client, allowedMonths) {
-  const objectiveMap = await loadMonthsObjectives(client, allowedMonths);
-
   const sessionMap = await loadSessionMap(client);
   const videoRows = await loadVideoEnabledSessionRows(client);
   const pdfRows = await loadPdfSessionRows(client);
@@ -865,14 +824,7 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
       }))
       .filter((quiz) => quiz.session && quiz.hasQuiz && quiz.sessionId);
 
-    return {
-      month,
-      objective: objectiveMap.get(month) || '',
-      videos,
-      pdfs,
-      quizzes,
-    };
-
+    return { month, videos, pdfs, quizzes };
   });
 
   return months;
@@ -1020,10 +972,7 @@ async function buildStudentDashboardPayload(client, authState, monthsPayload = n
       quizProgressPercent: null,
       performanceScorePercent: null,
       activity: [],
-      completedVideoIds: [],
-      completedQuizSessionIds: [],
     };
-
   }
 
   return {
@@ -1041,10 +990,7 @@ async function buildStudentDashboardPayload(client, authState, monthsPayload = n
     quizProgressPercent: totalQuizzes > 0 ? (solvedQuizzesCount / totalQuizzes) * 100 : 0,
     performanceScorePercent,
     activity: buildLast30DayActivity(solvedQuizRows, watchedVideos),
-    completedVideoIds: watchedVideos.map((v) => String(v.video_id || '')),
-    completedQuizSessionIds: solvedQuizRows.map((r) => String(r.session_id || '')),
   };
-
 }
 
 function getPreviousCalendarMonthRangeUtc(now = new Date()) {
@@ -2614,17 +2560,6 @@ app.post('/admin/videos', authMiddleware, async (req, res) => {
         JSON.stringify(videoRecord.videoMetadata),
       ],
     );
-
-    if (videoRecord.monthObjective) {
-      await ensureMonthsObjectiveTable(client);
-      await client.query(
-        `INSERT INTO months_objective (month_code, objective)
-         VALUES ($1, $2)
-         ON CONFLICT (month_code) DO UPDATE SET objective = EXCLUDED.objective, updated_at = NOW()`,
-        [videoRecord.month, videoRecord.monthObjective],
-      );
-    }
-
 
     return res.status(201).json({
       message: 'Encrypted video session saved successfully',
