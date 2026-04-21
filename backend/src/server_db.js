@@ -2915,7 +2915,8 @@ app.get('/admin/quiz-marks', authMiddleware, async (req, res) => {
               st.email,
               st.parent_phone_number,
               qr.score,
-              qr.total_questions
+              qr.total_questions,
+              qr.time_taken_seconds
        FROM quiz_results qr
        INNER JOIN "${studentTable}" st
          ON st.id = qr.student_id
@@ -2944,6 +2945,7 @@ app.get('/admin/quiz-marks', authMiddleware, async (req, res) => {
         parentPhoneNumber: String(row.parent_phone_number || '').trim(),
         quizMark: score,
         quizMarkPercent,
+        timeElapsedSeconds: Number(row.time_taken_seconds) || 0,
       };
     });
 
