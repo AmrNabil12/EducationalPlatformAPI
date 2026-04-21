@@ -128,10 +128,10 @@ function hasCompletedStudentSignup(student) {
 
   return Boolean(
     fullName
-      && gender
-      && phoneNumber
-      && parentPhoneNumber
-      && email,
+    && gender
+    && phoneNumber
+    && parentPhoneNumber
+    && email,
   );
 }
 
@@ -376,6 +376,7 @@ function normalizeSessionVideoMetadata(value) {
     createdAt: Number.isNaN(createdAtDate.getTime())
       ? new Date().toISOString()
       : createdAtDate.toISOString(),
+    details: raw.details || { concepts_explained: '', skills_earned: '' },
   };
 }
 
