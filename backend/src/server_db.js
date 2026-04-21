@@ -291,6 +291,7 @@ function mapAdminSerialRow(row) {
     fullName: String(row?.full_name || '').trim(),
     email: String(row?.email || '').trim(),
     phoneNumber: String(row?.phone_number || '').trim(),
+    parentPhoneNumber: String(row?.parent_phone_number || '').trim(),
     enrolledMonths,
     active: row?.active !== false,
     createdAt: row?.created_at || null,
@@ -2308,7 +2309,7 @@ app.put('/student/profile', authMiddleware, async (req, res) => {
 
 app.get('/admin/serials', authMiddleware, async (req, res) => {
   const query = String(req.query.q || '').trim();
-  const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), 50);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), 10000);
   const client = await pool.connect();
   try {
     const adminState = await getAdminFromToken(client, req.user);
@@ -2322,15 +2323,16 @@ app.get('/admin/serials', authMiddleware, async (req, res) => {
       : [limit];
     const result = await client.query(
       hasQuery
-        ? `SELECT serial_no, full_name, email, phone_number, active, created_at, allowed_months
+        ? `SELECT serial_no, full_name, email, phone_number, parent_phone_number, active, created_at, allowed_months
            FROM "${studentTable}"
            WHERE UPPER(serial_no) LIKE UPPER($1)
               OR UPPER(COALESCE(full_name, '')) LIKE UPPER($1)
               OR UPPER(COALESCE(email, '')) LIKE UPPER($1)
               OR COALESCE(phone_number, '') LIKE $1
+              OR COALESCE(parent_phone_number, '') LIKE $1
            ORDER BY created_at DESC, serial_no ASC
            LIMIT $2`
-        : `SELECT serial_no, full_name, email, phone_number, active, created_at, allowed_months
+        : `SELECT serial_no, full_name, email, phone_number, parent_phone_number, active, created_at, allowed_months
            FROM "${studentTable}"
            ORDER BY created_at DESC, serial_no ASC
            LIMIT $1`,
