@@ -2947,11 +2947,20 @@ app.get('/admin/quiz-marks', authMiddleware, async (req, res) => {
       };
     });
 
+    const studentsCountResult = await client.query(
+      `SELECT COUNT(*) FROM "${studentTable}"
+       WHERE active = TRUE
+         AND allowed_months ~* ('(^|,)\\s*' || $1 || '\\s*(,|$)')`,
+      [month],
+    );
+    const totalStudentsCount = parseInt(studentsCountResult.rows[0].count, 10) || 0;
+
     return res.json({
       result: {
         month,
         session,
         totalPoints,
+        totalStudentsCount,
         rows,
       },
     });
