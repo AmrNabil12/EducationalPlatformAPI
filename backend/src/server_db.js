@@ -811,7 +811,7 @@ async function ensureReportedIssuesTable(client) {
     `CREATE TABLE IF NOT EXISTS reported_issues (
        id SERIAL PRIMARY KEY,
        issue TEXT NOT NULL,
-       student_id INTEGER,
+       student_id BIGINT REFERENCES "${studentTable}" (id) ON DELETE SET NULL,
        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
      )`
   );
@@ -2225,7 +2225,7 @@ app.post('/auth/login', async (req, res) => {
         }
       }
 
-      const token = jwt.sign({ role: 'admin', serial, deviceId }, JWT_SECRET, {
+      const token = jwt.sign({ id: admin.id, role: 'admin', serial, deviceId }, JWT_SECRET, {
         expiresIn: '30d',
       });
 
@@ -2280,7 +2280,7 @@ app.post('/auth/login', async (req, res) => {
     }
 
     const allowedMonths = normalizeAllowedMonths(student.allowed_months);
-    const token = jwt.sign({ role: 'student', serial, deviceId }, JWT_SECRET, { expiresIn: '30d' });
+    const token = jwt.sign({ id: student.id, role: 'student', serial, deviceId }, JWT_SECRET, { expiresIn: '30d' });
 
     return res.json({
       token,
