@@ -798,9 +798,24 @@ async function ensureQuizSolutionDriveUrlColumn(client) {
   }
 
   await client.query(
-    'ALTER TABLE quiz_sessions ADD COLUMN solution_drive_url TEXT',
+    `ALTER TABLE quiz_sessions
+     ADD COLUMN solution_drive_url TEXT DEFAULT ''`,
   );
   quizSolutionColumnReady = true;
+}
+
+let reportedIssuesTableReady = false;
+async function ensureReportedIssuesTable(client) {
+  if (reportedIssuesTableReady) return;
+  await client.query(
+    `CREATE TABLE IF NOT EXISTS reported_issues (
+       id SERIAL PRIMARY KEY,
+       issue TEXT NOT NULL,
+       student_id INTEGER,
+       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+     )`
+  );
+  reportedIssuesTableReady = true;
 }
 
 async function loadQuizEnabledSessionIds(client) {
@@ -3572,8 +3587,30 @@ app.get('/videos/:videoId/plain', authMiddleware, (req, res) => {
   });
 });
 
+app.post('/support/report-issue', authMiddleware, async (req, res) => {
+  const issue = String(req.body.issue || '').trim();
+  if (!issue) {
+    return res.status(400).json({ error: 'Issue description is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await ensureReportedIssuesTable(client);
+    await client.query(
+      'INSERT INTO reported_issues (issue, student_id) VALUES ($1, $2)',
+      [issue, req.user?.id || null]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error reporting issue:', error);
+    res.status(500).json({ error: 'Failed to report issue' });
+  } finally {
+    client.release();
+  }
+});
+
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Backend (DB mode) listening on ${BASE_URL}`);
+  console.log(`Server running on ${BASE_URL}`);
 });
 
 server.on('error', (error) => {
