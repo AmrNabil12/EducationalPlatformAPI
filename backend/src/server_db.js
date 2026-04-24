@@ -2603,6 +2603,45 @@ app.patch('/admin/serials/subscription', authMiddleware, async (req, res) => {
   }
 });
 
+app.patch('/admin/serials/reset-device', authMiddleware, async (req, res) => {
+  const serial = normalizeSerial(req.body.serial);
+
+  if (!serial) {
+    return res.status(400).json({ error: 'serial is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    const adminState = await getAdminFromToken(client, req.user);
+    if (adminState.error) {
+      return res.status(adminState.status || 403).json({ error: adminState.error });
+    }
+
+    const result = await client.query(
+      `UPDATE "${studentTable}"
+       SET device_id = NULL,
+           public_key_pem = NULL,
+           updated_at = NOW()
+       WHERE UPPER(serial_no) = UPPER($1)
+       RETURNING serial_no, full_name, email, phone_number, active, created_at, allowed_months`,
+      [serial],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Student serial not found' });
+    }
+
+    return res.json({
+      message: 'Device reset successfully',
+      updated: [mapAdminSerialRow(result.rows[0])],
+    });
+  } catch (error) {
+    return res.status(500).json({ error: `Failed to reset device: ${error.message}` });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/admin/videos', authMiddleware, async (req, res) => {
   const normalized = normalizePendingEncryptedVideoRecord(req.body?.video);
   if (normalized.error) {
