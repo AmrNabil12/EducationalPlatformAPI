@@ -91,7 +91,7 @@ async function ensurePerformanceIndexes() {
     await client.query('CREATE INDEX IF NOT EXISTS idx_quiz_results_student ON quiz_results(student_id)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_sessions_month_code ON sessions(month_code)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_pdf_sessions_month_code ON pdf_sessions(month_code)');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_quizzes_session_id ON quizzes(session_id)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_quiz_sessions_session_id ON quiz_sessions(session_id)');
     console.log('Performance indexes verified.');
   } catch (err) {
     // If tables don't exist yet, it's fine, they will be created by migrations
@@ -823,10 +823,14 @@ async function ensureReportedIssuesTable(client) {
   reportedIssuesTableReady = true;
 }
 
-async function loadQuizEnabledSessionIds(client) {
-  const result = await client.query(
-    'SELECT session_id::text AS session_id FROM quiz_sessions',
-  );
+async function loadQuizEnabledSessionIds(client, allowedMonths = null) {
+  let query = 'SELECT DISTINCT q.session_id::text AS session_id FROM quiz_sessions q';
+  let params = [];
+  if (allowedMonths && allowedMonths.length > 0) {
+    query += ' JOIN sessions s ON q.session_id = s.id WHERE s.month_code = ANY($1)';
+    params = [allowedMonths];
+  }
+  const result = await client.query(query, params);
   return new Set(result.rows.map((row) => String(row.session_id || '')));
 }
 
@@ -865,7 +869,7 @@ async function buildAuthorizedMonthsPayload(client, allowedMonths) {
   const sessionMap = await loadSessionMap(client, allowedMonths);
   const videoRows = await loadVideoEnabledSessionRows(client, allowedMonths);
   const pdfRows = await loadPdfSessionRows(client, allowedMonths);
-  const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client);
+  const quizEnabledSessionIds = await loadQuizEnabledSessionIds(client, allowedMonths);
 
   const months = allowedMonths.map((month) => {
     const videos = videoRows
