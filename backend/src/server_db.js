@@ -82,6 +82,9 @@ const adminTable = sanitizeSqlIdentifier(ADMIN_SERIALS_TABLE);
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: DATABASE_SSL ? { rejectUnauthorized: false } : undefined,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
 async function ensurePerformanceIndexes() {
@@ -92,6 +95,8 @@ async function ensurePerformanceIndexes() {
     await client.query('CREATE INDEX IF NOT EXISTS idx_sessions_month_code ON sessions(month_code)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_pdf_sessions_month_code ON pdf_sessions(month_code)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_quiz_sessions_session_id ON quiz_sessions(session_id)');
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_students_serial_upper ON "${studentTable}" (UPPER(serial_no))`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_admins_serial_upper ON "${adminTable}" (UPPER(serial_no))`);
     console.log('Performance indexes verified.');
   } catch (err) {
     // If tables don't exist yet, it's fine, they will be created by migrations
